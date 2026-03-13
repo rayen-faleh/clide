@@ -52,8 +52,8 @@ class TestThinkingScheduler:
         await scheduler.start()
         assert scheduler.is_running is True
 
-        # Wait for at least one cycle
-        await asyncio.sleep(0.15)
+        # First callback fires immediately, then sleeps; wait enough for at least one cycle
+        await asyncio.sleep(0.1)
         await scheduler.stop()
         assert scheduler.is_running is False
         assert call_count >= 1

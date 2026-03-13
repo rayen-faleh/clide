@@ -79,8 +79,14 @@ class ConnectionManager:
         await websocket.send_json(message.model_dump(mode="json"))
 
     async def broadcast(self, message: WSMessage) -> None:
+        dead: list[WebSocket] = []
         for connection in self.active_connections:
-            await connection.send_json(message.model_dump(mode="json"))
+            try:
+                await connection.send_json(message.model_dump(mode="json"))
+            except Exception:
+                dead.append(connection)
+        for connection in dead:
+            self.active_connections.remove(connection)
 
 
 manager = ConnectionManager()

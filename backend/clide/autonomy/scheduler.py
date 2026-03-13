@@ -74,11 +74,12 @@ class ThinkingScheduler:
         """Main loop that fires the callback at intervals."""
         while self._running:
             try:
-                await asyncio.sleep(self.interval_seconds)
                 if self._running and self._callback:
                     await self._callback()
                     self._cycle_count += 1
+                await asyncio.sleep(self.interval_seconds)
             except asyncio.CancelledError:
                 break
             except Exception:
                 logger.exception("Error in thinking cycle")
+                await asyncio.sleep(self.interval_seconds)  # Back off on error

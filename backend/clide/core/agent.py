@@ -122,6 +122,10 @@ class AgentCore:
             except Exception:
                 logger.warning("Failed to update character", exc_info=True)
 
+        # Transition back to IDLE after response
+        if self.state_machine.state == AgentState.CONVERSING:
+            self.state_machine.transition(AgentState.IDLE, "response complete")
+
     async def autonomous_think(self) -> tuple[str, str, float] | None:
         """Run an autonomous thinking cycle.
 

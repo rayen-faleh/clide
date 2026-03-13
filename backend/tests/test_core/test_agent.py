@@ -47,12 +47,24 @@ class TestAgentCore:
         assert agent.cost_tracker is None
 
     @pytest.mark.asyncio
-    async def test_process_message_transitions_to_conversing(self) -> None:
+    async def test_process_message_transitions_to_conversing_and_back(self) -> None:
         agent = AgentCore()
-        with patch("clide.core.agent.stream_completion", side_effect=fake_stream_completion):
+        states_during: list[AgentState] = []
+
+        async def tracking_stream(
+            messages: list[dict[str, str]], config: object, **kwargs: object
+        ) -> AsyncIterator[str]:
+            states_during.append(agent.get_state())
+            for chunk in ["Hello", " there", "!"]:
+                yield chunk
+
+        with patch("clide.core.agent.stream_completion", side_effect=tracking_stream):
             async for _ in agent.process_message("hi"):
                 pass
-        assert agent.get_state() == AgentState.CONVERSING
+        # During streaming, state should have been CONVERSING
+        assert states_during == [AgentState.CONVERSING]
+        # After completion, state should be back to IDLE
+        assert agent.get_state() == AgentState.IDLE
 
     @pytest.mark.asyncio
     async def test_process_message_adds_to_history(self) -> None:
@@ -267,7 +279,7 @@ class TestProcessMessageWithoutDeps:
 
         assert chunks == ["Hello", " there", "!"]
         assert len(agent.conversation_history) == 2
-        assert agent.get_state() == AgentState.CONVERSING
+        assert agent.get_state() == AgentState.IDLE
 
 
 class TestAutonomousThink:
