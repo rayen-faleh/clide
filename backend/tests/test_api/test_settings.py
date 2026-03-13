@@ -63,9 +63,10 @@ agent:
         settings = Settings.from_yaml("/nonexistent/path/agent.yaml")
 
         assert settings.agent.name == "Clide"
-        assert settings.agent.llm.provider == "anthropic"
-        assert settings.agent.llm.model == "claude-sonnet-4-20250514"
+        assert settings.agent.llm.provider == "ollama"
+        assert settings.agent.llm.model == "llama3.2"
         assert settings.agent.llm.max_tokens == 4096
+        assert settings.agent.llm.api_base == ""
         assert settings.agent.states.sleep_schedule.enabled is False
         assert settings.agent.states.thinking.interval_seconds == 300
         assert settings.agent.states.budget.daily_token_limit == 500000
@@ -86,7 +87,7 @@ agent:
         assert settings.agent.name == "PartialAgent"
         assert settings.agent.llm.model == "custom-model"
         # Defaults should fill in the rest
-        assert settings.agent.llm.provider == "anthropic"
+        assert settings.agent.llm.provider == "ollama"
         assert settings.agent.llm.max_tokens == 4096
         assert settings.agent.states.sleep_schedule.enabled is False
         assert settings.agent.character.base_traits.curiosity == 0.8

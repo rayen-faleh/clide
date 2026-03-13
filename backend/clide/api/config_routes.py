@@ -2,24 +2,18 @@
 
 from __future__ import annotations
 
-# NOTE: This router must be registered in main.py:
-#   from clide.api.config_routes import config_router
-#   app.include_router(config_router)
-# Also, the /settings route must be added to frontend/src/router/index.ts
-# and a Settings nav link added to frontend/src/App.vue
-from pathlib import Path
 from typing import Any
 
 import yaml
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from clide.config.settings import Settings
+from clide.config.settings import _PROJECT_ROOT, Settings
 
 config_router = APIRouter(prefix="/api/config", tags=["config"])
 
-CONFIG_PATH = Path("config/agent.yaml")
-TOOLS_PATH = Path("config/tools.yaml")
+CONFIG_PATH = _PROJECT_ROOT / "config" / "agent.yaml"
+TOOLS_PATH = _PROJECT_ROOT / "config" / "tools.yaml"
 
 
 class ConfigUpdate(BaseModel):

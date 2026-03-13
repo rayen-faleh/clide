@@ -10,9 +10,10 @@ from pydantic import BaseModel
 
 
 class LLMSettings(BaseModel):
-    provider: str = "anthropic"
-    model: str = "claude-sonnet-4-20250514"
+    provider: str = "ollama"
+    model: str = "llama3.2"
     max_tokens: int = 4096
+    api_base: str = ""
 
 
 class SleepScheduleSettings(BaseModel):
@@ -67,15 +68,20 @@ class AgentSettings(BaseModel):
     character: CharacterSettings = CharacterSettings()
 
 
+# Project root: backend/clide/config/settings.py -> ../../.. -> project root
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
+_DEFAULT_CONFIG = _PROJECT_ROOT / "config" / "agent.yaml"
+
+
 class Settings(BaseModel):
     agent: AgentSettings = AgentSettings()
 
     @classmethod
-    def from_yaml(cls, path: Path | str = "config/agent.yaml") -> Settings:
+    def from_yaml(cls, path: Path | str | None = None) -> Settings:
         """Load settings from a YAML file."""
-        path = Path(path)
-        if not path.exists():
+        resolved = Path(path) if path is not None else _DEFAULT_CONFIG
+        if not resolved.exists():
             return cls()
-        with open(path) as f:
+        with open(resolved) as f:
             data: dict[str, Any] = yaml.safe_load(f) or {}
         return cls.model_validate(data)

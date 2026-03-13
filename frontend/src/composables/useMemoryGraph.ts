@@ -23,7 +23,7 @@ export interface MemoryGraphData {
   edge_count: number
 }
 
-export function useMemoryGraph(baseUrl: string = 'http://localhost:8000') {
+export function useMemoryGraph(baseUrl: string = '') {
   const graphData = ref<MemoryGraphData | null>(null)
   const loading = ref(false)
   const error = ref<string | null>(null)

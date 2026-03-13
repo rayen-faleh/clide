@@ -29,6 +29,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
         provider=settings.agent.llm.provider,
         model=settings.agent.llm.model,
         max_tokens=settings.agent.llm.max_tokens,
+        api_base=settings.agent.llm.api_base,
     )
 
     agent_core = AgentCore(llm_config=llm_config)

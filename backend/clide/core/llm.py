@@ -16,9 +16,10 @@ logger = logging.getLogger(__name__)
 class LLMConfig:
     """LLM configuration."""
 
-    provider: str = "anthropic"
-    model: str = "claude-sonnet-4-20250514"
+    provider: str = "ollama"
+    model: str = "llama3.2"
     max_tokens: int = 4096
+    api_base: str = ""
 
 
 def _build_model_name(config: LLMConfig) -> str:
@@ -47,13 +48,17 @@ async def stream_completion(
     model = _build_model_name(config)
     logger.debug("Streaming completion with model: %s", model)
 
-    response = await litellm.acompletion(
-        model=model,
-        messages=messages,
-        max_tokens=config.max_tokens,
-        stream=True,
+    call_kwargs: dict[str, Any] = {
+        "model": model,
+        "messages": messages,
+        "max_tokens": config.max_tokens,
+        "stream": True,
         **kwargs,
-    )
+    }
+    if config.api_base:
+        call_kwargs["api_base"] = config.api_base
+
+    response = await litellm.acompletion(**call_kwargs)
 
     async for chunk in response:
         content = chunk.choices[0].delta.content

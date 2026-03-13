@@ -3,7 +3,12 @@ import type { WSMessage } from '@/types/messages'
 
 export type ConnectionStatus = 'connecting' | 'connected' | 'disconnected' | 'error'
 
-export function useWebSocket(url: string = 'ws://localhost:8000/ws') {
+function defaultWsUrl(): string {
+  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+  return `${protocol}//${window.location.host}/ws`
+}
+
+export function useWebSocket(url: string = defaultWsUrl()) {
   const status = ref<ConnectionStatus>('disconnected')
   const lastMessage = ref<WSMessage | null>(null)
   const error = ref<string | null>(null)

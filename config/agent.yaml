@@ -1,9 +1,10 @@
 agent:
   name: "Clide"
   llm:
-    provider: "anthropic"
-    model: "claude-sonnet-4-20250514"
+    provider: "ollama"
+    model: "qwen3:1.7b"
     max_tokens: 4096
+    api_base: "http://localhost:11434"
   states:
     sleep_schedule:
       enabled: false
