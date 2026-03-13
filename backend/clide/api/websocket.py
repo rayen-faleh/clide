@@ -76,7 +76,10 @@ class ConnectionManager:
         self.active_connections.remove(websocket)
 
     async def send_message(self, websocket: WebSocket, message: WSMessage) -> None:
-        await websocket.send_json(message.model_dump(mode="json"))
+        try:
+            await websocket.send_json(message.model_dump(mode="json"))
+        except Exception:
+            logger.debug("Failed to send message to client, connection may be closed")
 
     async def broadcast(self, message: WSMessage) -> None:
         dead: list[WebSocket] = []

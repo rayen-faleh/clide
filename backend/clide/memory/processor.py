@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import uuid
 from typing import Any
 
@@ -40,6 +41,44 @@ Return a JSON array of objects with:
 - "strength": A float 0.0-1.0 indicating relationship strength
 
 Return ONLY valid JSON array. If no relations found, return []."""
+
+
+def _extract_json(text: str) -> Any:
+    """Extract JSON from LLM response that may contain markdown or preamble.
+
+    Tries in order:
+    1. Parse the whole string as JSON
+    2. Extract from ```json ... ``` code blocks
+    3. Find the first [ or { and parse from there
+    """
+    text = text.strip()
+
+    # Try direct parse
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+
+    # Try extracting from code block
+    match = re.search(r"```(?:json)?\s*\n?(.*?)```", text, re.DOTALL)
+    if match:
+        try:
+            return json.loads(match.group(1).strip())
+        except json.JSONDecodeError:
+            pass
+
+    # Try finding first JSON structure
+    for start_char, end_char in [("[", "]"), ("{", "}")]:
+        start = text.find(start_char)
+        if start != -1:
+            end = text.rfind(end_char)
+            if end > start:
+                try:
+                    return json.loads(text[start : end + 1])
+                except json.JSONDecodeError:
+                    pass
+
+    raise json.JSONDecodeError("No valid JSON found", text, 0)
 
 
 class MemoryProcessor:
@@ -94,10 +133,10 @@ class MemoryProcessor:
             response_text += chunk
 
         try:
-            result: dict[str, Any] = json.loads(response_text)
+            result: dict[str, Any] = _extract_json(response_text)
             return result
         except json.JSONDecodeError:
-            logger.warning("Failed to parse extraction response: %s", response_text)
+            logger.warning("Failed to parse extraction response: %s", response_text[:200])
             return {
                 "summary": content[:100],
                 "keywords": [],
@@ -129,7 +168,9 @@ class MemoryProcessor:
             response_text += chunk
 
         try:
-            links_data: list[dict[str, object]] = json.loads(response_text)
+            links_data: list[dict[str, object]] = _extract_json(response_text)
+            if not isinstance(links_data, list):
+                return []
             return [
                 MemoryLink(
                     source_id=memory_id,
@@ -141,5 +182,5 @@ class MemoryProcessor:
                 if isinstance(link, dict) and "target_id" in link
             ]
         except (json.JSONDecodeError, KeyError):
-            logger.warning("Failed to parse links response: %s", response_text)
+            logger.warning("Failed to parse links response: %s", response_text[:200])
             return []
