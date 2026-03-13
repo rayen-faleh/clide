@@ -54,8 +54,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     )
     await character.load()  # Load persisted state if exists
 
-    # Agent core — pass all deps (extra kwargs added by Agent J's branch)
-    agent_core = AgentCore(  # type: ignore[call-arg]
+    # Agent core — pass all deps
+    agent_core = AgentCore(
         llm_config=llm_config,
         amem=amem,
         character=character,
@@ -73,7 +73,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
 
     # Define the thinking callback
     async def thinking_callback() -> None:
-        result = await agent_core.autonomous_think()  # type: ignore[attr-defined]
+        result = await agent_core.autonomous_think()
         if result:
             thought_content, mood, intensity = result
             # Late import to avoid circular imports
