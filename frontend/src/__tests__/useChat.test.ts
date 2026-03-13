@@ -1,8 +1,13 @@
-import { describe, it, expect, vi } from 'vitest'
+import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { setActivePinia, createPinia } from 'pinia'
 import { useChat } from '@/composables/useChat'
 import type { WSMessage } from '@/types/messages'
 
 describe('useChat', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+  })
+
   it('sendMessage adds user message and assistant placeholder', () => {
     const sendWs = vi.fn()
     const { messages, sendMessage } = useChat(sendWs)

@@ -20,6 +20,7 @@ from clide.config.settings import Settings
 from clide.core.agent import AgentCore
 from clide.core.cost import CostTracker
 from clide.core.llm import LLMConfig
+from clide.core.prompts import DEFAULT_SYSTEM_PROMPT
 from clide.memory.amem import AMem
 
 
@@ -57,6 +58,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     # Agent core — pass all deps
     agent_core = AgentCore(
         llm_config=llm_config,
+        system_prompt=settings.agent.system_prompt or DEFAULT_SYSTEM_PROMPT,
         amem=amem,
         character=character,
         cost_tracker=cost_tracker,

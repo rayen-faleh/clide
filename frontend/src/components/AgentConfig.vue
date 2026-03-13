@@ -1,9 +1,10 @@
 <script setup lang="ts">
-import { reactive, watch } from 'vue'
+import { reactive, ref, watch } from 'vue'
 
 interface Config {
   agent: {
     name: string
+    system_prompt: string
     llm: { provider: string; model: string; max_tokens: number }
     states: {
       thinking: { interval_seconds: number; max_consecutive_cycles: number }
@@ -31,6 +32,8 @@ const emit = defineEmits<{
   save: [config: Config]
 }>()
 
+const systemPrompt = ref(props.config.agent.system_prompt ?? '')
+
 const traits = reactive({
   curiosity: props.config.agent.character.base_traits.curiosity,
   warmth: props.config.agent.character.base_traits.warmth,
@@ -52,6 +55,7 @@ const budget = reactive({
 watch(
   () => props.config,
   (newConfig) => {
+    systemPrompt.value = newConfig.agent.system_prompt ?? ''
     Object.assign(traits, newConfig.agent.character.base_traits)
     autonomy.interval_seconds = newConfig.agent.states.thinking.interval_seconds
     autonomy.max_consecutive_cycles = newConfig.agent.states.thinking.max_consecutive_cycles
@@ -73,6 +77,7 @@ function handleSave() {
   const updated: Config = {
     agent: {
       ...props.config.agent,
+      system_prompt: systemPrompt.value,
       character: {
         base_traits: { ...traits },
       },
@@ -95,6 +100,19 @@ function handleSave() {
 
 <template>
   <div class="agent-config">
+    <section class="config-section">
+      <h3 class="section-title">System Prompt</h3>
+      <div class="field-row field-row--vertical">
+        <label class="field-label">System Prompt</label>
+        <textarea
+          v-model="systemPrompt"
+          rows="5"
+          class="field-textarea"
+          placeholder="Enter custom system prompt..."
+        />
+      </div>
+    </section>
+
     <section class="config-section">
       <h3 class="section-title">Personality Traits</h3>
       <div class="trait-list">
@@ -263,6 +281,28 @@ function handleSave() {
 }
 
 .field-input:focus {
+  border-color: var(--color-focus);
+}
+
+.field-row--vertical {
+  flex-direction: column;
+  align-items: stretch;
+}
+
+.field-textarea {
+  width: 100%;
+  padding: 8px 10px;
+  background-color: var(--color-input-bg);
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  color: var(--color-text);
+  font-size: 13px;
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  outline: none;
+  resize: vertical;
+}
+
+.field-textarea:focus {
   border-color: var(--color-focus);
 }
 

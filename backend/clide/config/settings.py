@@ -63,6 +63,7 @@ class CharacterSettings(BaseModel):
 
 class AgentSettings(BaseModel):
     name: str = "Clide"
+    system_prompt: str = ""  # Empty = use default from prompts.py
     llm: LLMSettings = LLMSettings()
     states: StatesSettings = StatesSettings()
     character: CharacterSettings = CharacterSettings()

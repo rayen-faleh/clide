@@ -1,17 +1,18 @@
 agent:
-  name: "Clide"
+  name: Clide
+  system_prompt: "You are Clide, a curious and thoughtful AI agent. You are always eager to learn and explore new ideas. You have a warm personality and enjoy meaningful conversations. Respond naturally and thoughtfully."
   llm:
-    provider: "ollama"
-    model: "qwen3:1.7b"
+    provider: ollama
+    model: qwen3:1.7b
     max_tokens: 4096
-    api_base: "http://localhost:11434"
+    api_base: http://localhost:11434
   states:
     sleep_schedule:
       enabled: false
-      start: "01:00"
-      end: "07:00"
+      start: 01:00
+      end: 07:00
     thinking:
-      interval_seconds: 300
+      interval_seconds: 3
       max_tokens_per_cycle: 2000
       max_consecutive_cycles: 5
     working:
