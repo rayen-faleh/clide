@@ -1,10 +1,11 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { useWebSocket } from '@/composables/useWebSocket'
+import { useWebSocket, resetWebSocketState } from '@/composables/useWebSocket'
 import type { WSMessage } from '@/types/messages'
 
 class MockWebSocket {
   static OPEN = 1
   static CLOSED = 3
+  static CONNECTING = 0
   static instances: MockWebSocket[] = []
 
   readyState = MockWebSocket.OPEN
@@ -44,6 +45,7 @@ class MockWebSocket {
 beforeEach(() => {
   MockWebSocket.instances = []
   vi.stubGlobal('WebSocket', MockWebSocket)
+  resetWebSocketState()
 })
 
 describe('useWebSocket', () => {
@@ -144,5 +146,17 @@ describe('useWebSocket', () => {
     disconnect()
     expect(ws.close).toHaveBeenCalled()
     expect(status.value).toBe('disconnected')
+  })
+
+  it('shares state across multiple calls (singleton)', () => {
+    const first = useWebSocket('ws://localhost:8000/ws')
+    const second = useWebSocket('ws://localhost:8000/ws')
+
+    first.connect()
+    const ws = MockWebSocket.instances[0]
+    ws.simulateOpen()
+
+    expect(first.status.value).toBe('connected')
+    expect(second.status.value).toBe('connected')
   })
 })

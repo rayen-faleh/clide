@@ -2,11 +2,9 @@
 import { describe, it, expect } from 'vitest'
 import { mount } from '@vue/test-utils'
 import ThoughtStream from '@/components/ThoughtStream.vue'
-import type { ThoughtPayload } from '@/types/messages'
+import type { ThoughtEntry } from '@/stores/agent'
 
-function createThought(
-  overrides: Partial<ThoughtPayload & { timestamp: string }> = {},
-): ThoughtPayload & { timestamp: string } {
+function createThought(overrides: Partial<ThoughtEntry> = {}): ThoughtEntry {
   return {
     content: 'A test thought',
     source: 'autonomous',

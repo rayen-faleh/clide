@@ -3,21 +3,35 @@ import type { WSMessage } from '@/types/messages'
 
 export type ConnectionStatus = 'connecting' | 'connected' | 'disconnected' | 'error'
 
+// Module-level singleton state
+const status = ref<ConnectionStatus>('disconnected')
+const lastMessage = ref<WSMessage | null>(null)
+const error = ref<string | null>(null)
+let ws: WebSocket | null = null
+let reconnectTimer: ReturnType<typeof setTimeout> | null = null
+const messageHandlers = new Map<string, ((msg: WSMessage) => void)[]>()
+
 function defaultWsUrl(): string {
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
   return `${protocol}//${window.location.host}/ws`
 }
 
-export function useWebSocket(url: string = defaultWsUrl()) {
-  const status = ref<ConnectionStatus>('disconnected')
-  const lastMessage = ref<WSMessage | null>(null)
-  const error = ref<string | null>(null)
-  let ws: WebSocket | null = null
-  let reconnectTimer: ReturnType<typeof setTimeout> | null = null
-  const messageHandlers = new Map<string, ((msg: WSMessage) => void)[]>()
+export function resetWebSocketState() {
+  ws?.close()
+  ws = null
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer)
+    reconnectTimer = null
+  }
+  status.value = 'disconnected'
+  lastMessage.value = null
+  error.value = null
+  messageHandlers.clear()
+}
 
+export function useWebSocket(url: string = defaultWsUrl()) {
   function connect() {
-    if (ws?.readyState === WebSocket.OPEN) return
+    if (ws?.readyState === WebSocket.OPEN || ws?.readyState === WebSocket.CONNECTING) return
 
     status.value = 'connecting'
     ws = new WebSocket(url)

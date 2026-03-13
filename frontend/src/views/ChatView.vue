@@ -3,10 +3,11 @@ import { onMounted, onUnmounted, watch, ref, nextTick } from 'vue'
 import { useWebSocket } from '@/composables/useWebSocket'
 import { useChat } from '@/composables/useChat'
 import { useAgentStore } from '@/stores/agent'
+import type { WSMessage } from '@/types/messages'
 import ChatMessage from '@/components/ChatMessage.vue'
 import ChatInput from '@/components/ChatInput.vue'
 
-const { status, connect, disconnect, send, on } = useWebSocket()
+const { status, connect, send, on, off } = useWebSocket()
 const { messages, isStreaming, sendMessage, handleResponseChunk } = useChat(send)
 const agentStore = useAgentStore()
 
@@ -30,11 +31,23 @@ watch(
   () => scrollToBottom(),
 )
 
+function handleStateChange(msg: WSMessage) {
+  agentStore.handleStateChange(msg)
+}
+
+function handleMoodUpdate(msg: WSMessage) {
+  agentStore.handleMoodUpdate(msg)
+}
+
+function handleThought(msg: WSMessage) {
+  agentStore.handleThought(msg)
+}
+
 onMounted(() => {
   on('chat_response_chunk', handleResponseChunk)
-  on('state_change', agentStore.handleStateChange)
-  on('mood_update', agentStore.handleMoodUpdate)
-  on('thought', agentStore.handleThought)
+  on('state_change', handleStateChange)
+  on('mood_update', handleMoodUpdate)
+  on('thought', handleThought)
 
   watch(status, (newStatus) => {
     agentStore.setConnected(newStatus === 'connected')
@@ -44,7 +57,10 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
-  disconnect()
+  off('chat_response_chunk', handleResponseChunk)
+  off('state_change', handleStateChange)
+  off('mood_update', handleMoodUpdate)
+  off('thought', handleThought)
 })
 </script>
 

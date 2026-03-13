@@ -10,10 +10,17 @@ export interface ChatEntry {
   streaming?: boolean
 }
 
+export interface ThoughtEntry {
+  content: string
+  source: string
+  timestamp: string
+}
+
 export const useAgentStore = defineStore('agent', () => {
   const state = ref<AgentState>('idle')
   const mood = ref<MoodPayload | null>(null)
   const currentThought = ref<string | null>(null)
+  const thoughts = ref<ThoughtEntry[]>([])
   const connected = ref(false)
 
   // Chat state — persists across navigation
@@ -30,8 +37,13 @@ export const useAgentStore = defineStore('agent', () => {
   }
 
   function handleThought(msg: WSMessage) {
-    const payload = msg.payload as { content: string }
+    const payload = msg.payload as { content: string; source?: string }
     currentThought.value = payload.content
+    thoughts.value.push({
+      content: payload.content,
+      source: payload.source ?? 'autonomous',
+      timestamp: msg.timestamp,
+    })
   }
 
   function setConnected(value: boolean) {
@@ -65,6 +77,7 @@ export const useAgentStore = defineStore('agent', () => {
     state,
     mood,
     currentThought,
+    thoughts,
     connected,
     messages,
     isStreaming,

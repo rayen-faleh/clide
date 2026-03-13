@@ -6,11 +6,7 @@ import AgentStateIndicator from '@/components/AgentStateIndicator.vue'
 import MoodDisplay from '@/components/MoodDisplay.vue'
 import ThoughtStream from '@/components/ThoughtStream.vue'
 import GoalTracker from '@/components/GoalTracker.vue'
-import type { ThoughtPayload, WSMessage } from '@/types/messages'
-
-interface ThoughtEntry extends ThoughtPayload {
-  timestamp: string
-}
+import type { WSMessage } from '@/types/messages'
 
 interface Goal {
   description: string
@@ -20,18 +16,12 @@ interface Goal {
 }
 
 const agentStore = useAgentStore()
-const { connect, disconnect, on } = useWebSocket()
+const { connect, on, off } = useWebSocket()
 
-const thoughts = ref<ThoughtEntry[]>([])
 const goals = ref<Goal[]>([])
 
 function handleThought(msg: WSMessage) {
   agentStore.handleThought(msg)
-  const payload = msg.payload as unknown as ThoughtPayload
-  thoughts.value.push({
-    ...payload,
-    timestamp: msg.timestamp,
-  })
 }
 
 function handleMoodUpdate(msg: WSMessage) {
@@ -50,7 +40,9 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
-  disconnect()
+  off('thought', handleThought)
+  off('mood_update', handleMoodUpdate)
+  off('state_change', handleStateChange)
 })
 </script>
 
@@ -64,7 +56,7 @@ onUnmounted(() => {
       />
     </div>
     <div class="dashboard-body">
-      <ThoughtStream :thoughts="thoughts" class="dashboard-thoughts" />
+      <ThoughtStream :thoughts="agentStore.thoughts" class="dashboard-thoughts" />
       <GoalTracker :goals="goals" class="dashboard-goals" />
     </div>
   </div>

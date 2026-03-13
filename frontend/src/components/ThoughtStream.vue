@@ -1,9 +1,5 @@
 <script setup lang="ts">
-import type { ThoughtPayload } from '@/types/messages'
-
-interface ThoughtEntry extends ThoughtPayload {
-  timestamp: string
-}
+import type { ThoughtEntry } from '@/stores/agent'
 
 defineProps<{
   thoughts: ThoughtEntry[]
