@@ -1,0 +1,29 @@
+agent:
+  name: "Clide"
+  llm:
+    provider: "anthropic"
+    model: "claude-sonnet-4-20250514"
+    max_tokens: 4096
+  states:
+    sleep_schedule:
+      enabled: false
+      start: "01:00"
+      end: "07:00"
+    thinking:
+      interval_seconds: 300
+      max_tokens_per_cycle: 2000
+      max_consecutive_cycles: 5
+    working:
+      max_tool_steps: 10
+    conversing:
+      idle_timeout_seconds: 300
+    budget:
+      daily_token_limit: 500000
+      warning_threshold: 0.8
+  character:
+    base_traits:
+      curiosity: 0.8
+      warmth: 0.7
+      humor: 0.5
+      assertiveness: 0.4
+      creativity: 0.7

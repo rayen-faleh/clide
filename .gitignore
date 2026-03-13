@@ -1,1 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+*.egg
+
+# Node
+node_modules/
+frontend/dist/
+
+# IDE
+.vscode/
+.idea/
+
+# Runtime
+*.db
+*.sqlite
+.env
+
+# UV
+backend/.venv/
+
+# Claude
+.claude/worktrees/
+
+# OS
+.DS_Store
+
+# MCP
 .mcp.json

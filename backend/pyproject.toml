@@ -1,0 +1,49 @@
+[project]
+name = "clide"
+version = "0.1.0"
+description = "CLIDE - AI Agent Application"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi[standard]",
+    "websockets",
+    "litellm",
+    "chromadb",
+    "pydantic>=2.0",
+    "pyyaml",
+    "sqlalchemy[asyncio]",
+    "aiosqlite",
+    "apscheduler>=4.0.0a1",
+]
+
+[dependency-groups]
+dev = [
+    "ruff",
+    "mypy",
+    "pytest",
+    "pytest-asyncio",
+    "pytest-cov",
+    "httpx",
+    "types-pyyaml",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "N"]
+
+[tool.mypy]
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+python_version = "3.12"
+plugins = ["pydantic.mypy"]
+
+[[tool.mypy.overrides]]
+module = ["litellm.*", "chromadb.*", "apscheduler.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
