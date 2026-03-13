@@ -7,6 +7,7 @@
       <div class="nav-links">
         <RouterLink to="/chat">Chat</RouterLink>
         <RouterLink to="/dashboard">Dashboard</RouterLink>
+        <RouterLink to="/settings">Settings</RouterLink>
       </div>
     </nav>
     <main class="main-content">

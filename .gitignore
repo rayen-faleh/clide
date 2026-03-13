@@ -30,5 +30,8 @@ backend/.venv/
 # OS
 .DS_Store
 
+# Data
+data/
+
 # MCP
 .mcp.json
