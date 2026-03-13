@@ -189,6 +189,18 @@ async def _handle_chat_message(
                 ).model_dump(),
             ),
         )
+
+        # Broadcast state change to all clients
+        await manager.broadcast(
+            WSMessage(
+                type=WSMessageType.STATE_CHANGE,
+                payload=StateChangePayload(
+                    previous_state=AgentState.CONVERSING,
+                    new_state=core.get_state(),
+                    reason="response complete",
+                ).model_dump(),
+            )
+        )
     except Exception as e:
         logger.exception("Error processing message")
         await manager.send_message(
