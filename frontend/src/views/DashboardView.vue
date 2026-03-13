@@ -1,9 +1,72 @@
-<script setup lang="ts"></script>
+<script setup lang="ts">
+import { ref, onMounted, onUnmounted } from 'vue'
+import { useAgentStore } from '@/stores/agent'
+import { useWebSocket } from '@/composables/useWebSocket'
+import AgentStateIndicator from '@/components/AgentStateIndicator.vue'
+import MoodDisplay from '@/components/MoodDisplay.vue'
+import ThoughtStream from '@/components/ThoughtStream.vue'
+import GoalTracker from '@/components/GoalTracker.vue'
+import type { ThoughtPayload, WSMessage } from '@/types/messages'
+
+interface ThoughtEntry extends ThoughtPayload {
+  timestamp: string
+}
+
+interface Goal {
+  description: string
+  priority: string
+  status: string
+  progress: number
+}
+
+const agentStore = useAgentStore()
+const { connect, disconnect, on } = useWebSocket()
+
+const thoughts = ref<ThoughtEntry[]>([])
+const goals = ref<Goal[]>([])
+
+function handleThought(msg: WSMessage) {
+  agentStore.handleThought(msg)
+  const payload = msg.payload as unknown as ThoughtPayload
+  thoughts.value.push({
+    ...payload,
+    timestamp: msg.timestamp,
+  })
+}
+
+function handleMoodUpdate(msg: WSMessage) {
+  agentStore.handleMoodUpdate(msg)
+}
+
+function handleStateChange(msg: WSMessage) {
+  agentStore.handleStateChange(msg)
+}
+
+onMounted(() => {
+  on('thought', handleThought)
+  on('mood_update', handleMoodUpdate)
+  on('state_change', handleStateChange)
+  connect()
+})
+
+onUnmounted(() => {
+  disconnect()
+})
+</script>
 
 <template>
   <div class="dashboard-view">
-    <h2>Dashboard</h2>
-    <p>Dashboard coming in Phase 3</p>
+    <div class="dashboard-header">
+      <AgentStateIndicator :state="agentStore.state" />
+      <MoodDisplay
+        :mood="agentStore.mood?.mood ?? 'neutral'"
+        :intensity="agentStore.mood?.intensity ?? 0.5"
+      />
+    </div>
+    <div class="dashboard-body">
+      <ThoughtStream :thoughts="thoughts" class="dashboard-thoughts" />
+      <GoalTracker :goals="goals" class="dashboard-goals" />
+    </div>
   </div>
 </template>
 
@@ -11,14 +74,34 @@
 .dashboard-view {
   display: flex;
   flex-direction: column;
-  align-items: center;
-  justify-content: center;
   height: 100%;
-  color: var(--color-text-secondary, #9ca3af);
+  padding: 16px;
+  gap: 16px;
 }
 
-h2 {
-  margin-bottom: 8px;
-  color: var(--color-text, #e5e7eb);
+.dashboard-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  background-color: var(--color-surface);
+  border-radius: 8px;
+  border: 1px solid var(--color-border);
+}
+
+.dashboard-body {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  flex: 1;
+  min-height: 0;
+}
+
+.dashboard-thoughts {
+  min-height: 0;
+}
+
+.dashboard-goals {
+  min-height: 0;
 }
 </style>
