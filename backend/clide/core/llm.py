@@ -1,0 +1,61 @@
+"""LLM integration via litellm."""
+
+from __future__ import annotations
+
+import logging
+from collections.abc import AsyncIterator
+from dataclasses import dataclass
+from typing import Any
+
+import litellm
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class LLMConfig:
+    """LLM configuration."""
+
+    provider: str = "anthropic"
+    model: str = "claude-sonnet-4-20250514"
+    max_tokens: int = 4096
+
+
+def _build_model_name(config: LLMConfig) -> str:
+    """Build the litellm model name from config."""
+    # litellm uses format: provider/model
+    if config.provider == "anthropic":
+        return config.model
+    return f"{config.provider}/{config.model}"
+
+
+async def stream_completion(
+    messages: list[dict[str, str]],
+    config: LLMConfig,
+    **kwargs: Any,
+) -> AsyncIterator[str]:
+    """Stream completion tokens from the LLM.
+
+    Args:
+        messages: List of message dicts with 'role' and 'content'
+        config: LLM configuration
+        **kwargs: Additional arguments passed to litellm
+
+    Yields:
+        String chunks of the response
+    """
+    model = _build_model_name(config)
+    logger.debug("Streaming completion with model: %s", model)
+
+    response = await litellm.acompletion(
+        model=model,
+        messages=messages,
+        max_tokens=config.max_tokens,
+        stream=True,
+        **kwargs,
+    )
+
+    async for chunk in response:
+        content = chunk.choices[0].delta.content
+        if content:
+            yield content
