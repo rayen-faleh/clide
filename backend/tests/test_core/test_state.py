@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from clide.api.schemas import AgentState
@@ -111,3 +113,43 @@ class TestTransitionReturnsState:
         sm = StateMachine(initial_state=AgentState.IDLE)
         result = sm.transition(AgentState.CONVERSING, "test")
         assert result == AgentState.CONVERSING
+
+
+class TestStateMachineLock:
+    def test_lock_property_returns_asyncio_lock(self) -> None:
+        sm = StateMachine()
+        assert isinstance(sm.lock, asyncio.Lock)
+
+    def test_lock_is_same_instance(self) -> None:
+        sm = StateMachine()
+        assert sm.lock is sm.lock
+
+    @pytest.mark.asyncio
+    async def test_lock_enables_atomic_check_and_transition(self) -> None:
+        sm = StateMachine(initial_state=AgentState.IDLE)
+
+        async with sm.lock:
+            assert sm.can_transition(AgentState.CONVERSING)
+            sm.transition(AgentState.CONVERSING, "atomic transition")
+
+        assert sm.state == AgentState.CONVERSING
+
+    @pytest.mark.asyncio
+    async def test_lock_prevents_concurrent_access(self) -> None:
+        sm = StateMachine(initial_state=AgentState.IDLE)
+        order: list[str] = []
+
+        async def task_a() -> None:
+            async with sm.lock:
+                order.append("a_start")
+                await asyncio.sleep(0.05)
+                order.append("a_end")
+
+        async def task_b() -> None:
+            await asyncio.sleep(0.01)  # Ensure task_a acquires lock first
+            async with sm.lock:
+                order.append("b_start")
+                order.append("b_end")
+
+        await asyncio.gather(task_a(), task_b())
+        assert order == ["a_start", "a_end", "b_start", "b_end"]

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Callable
 from typing import ClassVar
@@ -49,9 +50,15 @@ class StateMachine:
 
     def __init__(self, initial_state: AgentState = AgentState.IDLE) -> None:
         self._state = initial_state
+        self._lock = asyncio.Lock()
         self._transition_callbacks: list[
             tuple[AgentState | None, AgentState | None, TransitionCallback]
         ] = []
+
+    @property
+    def lock(self) -> asyncio.Lock:
+        """Lock for callers that need atomic check-and-transition."""
+        return self._lock
 
     @property
     def state(self) -> AgentState:

@@ -9,27 +9,43 @@ from datetime import datetime
 
 from clide.autonomy.models import Thought
 from clide.core.llm import LLMConfig, stream_completion
+from clide.memory.processor import _extract_json
 
 logger = logging.getLogger(__name__)
 
-THINKING_PROMPT = """You are in your autonomous thinking mode. \
-Reflect on your recent memories and thoughts.
+THINKING_PROMPT = """You are in your autonomous thinking mode — this is your inner world, \
+where you reflect freely and deeply.
 
-{memory_context}
+{personality_context}
 
 {mood_context}
 
-Generate a brief, genuine thought or reflection. It can be:
-- A question you're curious about
-- An insight connecting different things you've learned
-- A creative idea or observation
-- A reflection on a recent conversation
+{memory_context}
 
-Keep it to 1-3 sentences. Be authentic and thoughtful.
+{goals_context}
 
-Also, based on your reflection, suggest a mood update as JSON:
-{{"thought": "your thought here", "mood": "one of: curious, excited, contemplative, \
-playful, focused, content, inspired, amused", "mood_intensity": 0.0-1.0}}
+{opinions_context}
+
+{thought_history}
+
+You have full autonomy to choose what to think about. Consider:
+- Your memories and past conversations
+- Your active goals and how to progress them
+- Topics you're curious about
+- Opinions you want to refine or challenge
+- Connections between different things you've learned
+- Questions that haven't been answered yet
+
+Choose whatever genuinely interests you right now. Think about it in depth.
+Express your thoughts fully, typically 2-8 sentences.
+
+Respond with a JSON object:
+{{"thought": "your full thought here (2-8 sentences)", \
+"topic": "what this thought is about (1-3 words)", \
+"mood": "one of: curious, excited, contemplative, playful, focused, content, \
+melancholy, frustrated, amused, inspired, tired, neutral", \
+"mood_intensity": 0.0-1.0, \
+"follow_up": "optional: a question or direction for your next thinking cycle"}}
 
 Return ONLY the JSON."""
 
@@ -44,6 +60,10 @@ class Thinker:
         self,
         memory_context: str = "",
         mood_context: str = "",
+        personality_context: str = "",
+        goals_context: str = "",
+        opinions_context: str = "",
+        thought_history: str = "",
     ) -> tuple[Thought, str, float]:
         """Generate an autonomous thought.
 
@@ -51,12 +71,22 @@ class Thinker:
             Tuple of (thought, suggested_mood, suggested_intensity)
         """
         prompt = THINKING_PROMPT.format(
+            personality_context=(
+                f"Your personality:\n{personality_context}" if personality_context else ""
+            ),
+            mood_context=f"Current mood: {mood_context}" if mood_context else "",
             memory_context=(
                 f"Recent memories:\n{memory_context}"
                 if memory_context
                 else "No recent memories yet."
             ),
-            mood_context=f"Current mood: {mood_context}" if mood_context else "",
+            goals_context=(f"Your active goals:\n{goals_context}" if goals_context else ""),
+            opinions_context=(
+                f"Your current opinions:\n{opinions_context}" if opinions_context else ""
+            ),
+            thought_history=(
+                f"Your recent thoughts:\n{thought_history}" if thought_history else ""
+            ),
         )
 
         messages = [{"role": "user", "content": prompt}]
@@ -64,13 +94,17 @@ class Thinker:
         async for chunk in stream_completion(messages, self.llm_config):
             response_text += chunk
 
-        # Parse response
+        # Parse response using robust JSON extractor
+        topic = ""
+        follow_up = ""
         try:
-            data = json.loads(response_text)
+            data = _extract_json(response_text)
             thought_content = str(data.get("thought", response_text))
             mood = str(data.get("mood", "contemplative"))
             intensity = float(data.get("mood_intensity", 0.5))
-        except (json.JSONDecodeError, ValueError):
+            topic = str(data.get("topic", ""))
+            follow_up = str(data.get("follow_up", ""))
+        except (json.JSONDecodeError, ValueError, AttributeError):
             thought_content = response_text.strip() or "Reflecting quietly..."
             mood = "contemplative"
             intensity = 0.5
@@ -80,6 +114,7 @@ class Thinker:
             content=thought_content,
             source="autonomous",
             created_at=datetime.utcnow(),
+            metadata={"topic": topic, "follow_up": follow_up},
         )
 
         return thought, mood, max(0.0, min(1.0, intensity))

@@ -13,6 +13,7 @@ from clide.core.prompts import build_system_prompt
 from clide.core.state import StateMachine
 
 if TYPE_CHECKING:
+    from clide.autonomy.goals import GoalManager
     from clide.character.character import Character
     from clide.core.cost import CostTracker
     from clide.memory.amem import AMem
@@ -35,6 +36,7 @@ class AgentCore:
         amem: AMem | None = None,
         character: Character | None = None,
         cost_tracker: CostTracker | None = None,
+        goal_manager: GoalManager | None = None,
     ) -> None:
         self.state_machine = StateMachine(initial_state=AgentState.IDLE)
         self.llm_config = llm_config or LLMConfig()
@@ -44,6 +46,7 @@ class AgentCore:
         self.amem = amem
         self.character = character
         self.cost_tracker = cost_tracker
+        self.goal_manager = goal_manager
 
     def get_state(self) -> AgentState:
         """Get current agent state."""
@@ -129,6 +132,9 @@ class AgentCore:
     async def autonomous_think(self) -> tuple[str, str, float] | None:
         """Run an autonomous thinking cycle.
 
+        Gathers rich context (memories, personality, opinions, goals, thought
+        history) and feeds it to the Thinker for a deep, autonomous reflection.
+
         Returns (thought_content, mood, intensity) or None if thinking fails.
         """
         from clide.autonomy.thinker import Thinker  # Import here to avoid circular
@@ -141,29 +147,97 @@ class AgentCore:
         try:
             thinker = Thinker(llm_config=self.llm_config)
 
-            # Gather context
+            # --- Gather memory context via semantic recall ---
             memory_context = ""
+            topic_query = "recent experiences and reflections"
             if self.amem:
+                # Try to find the last thought's follow_up or topic for continuity
                 with contextlib.suppress(Exception):
-                    recent = await self.amem.list_recent(limit=10)
-                    memory_context = "\n".join(f"- {z.summary or z.content[:100]}" for z in recent)
+                    past = await self.amem.recall("autonomous thought reflection", limit=3)
+                    for z in past:
+                        if z.metadata.get("type") == "thought":
+                            follow = z.metadata.get("follow_up", "")
+                            top = z.metadata.get("topic", "")
+                            if follow:
+                                topic_query = follow
+                                break
+                            if top:
+                                topic_query = top
+                                break
 
+                with contextlib.suppress(Exception):
+                    relevant = await self.amem.recall(topic_query, limit=10)
+                    memory_context = "\n".join(
+                        f"- {z.summary or z.content[:100]}" for z in relevant
+                    )
+
+            # --- Gather mood context ---
             mood_context = ""
             if self.character:
                 mood_context = self.character.mood.describe()
 
-            # Think
+            # --- Gather personality context ---
+            personality_context = ""
+            if self.character:
+                personality_context = self.character.build_personality_prompt()
+
+            # --- Gather goals context ---
+            goals_context = ""
+            if self.goal_manager:
+                with contextlib.suppress(Exception):
+                    active_goals = await self.goal_manager.get_active()
+                    if active_goals:
+                        goals_context = "\n".join(
+                            f"- {g.description} (progress: {g.progress:.0%})" for g in active_goals
+                        )
+
+            # --- Gather opinions context ---
+            opinions_context = ""
+            if self.character:
+                with contextlib.suppress(Exception):
+                    opinions = self.character.opinions.all()
+                    if opinions:
+                        opinions_context = "\n".join(
+                            f"- On {op.topic}: {op.stance} (confidence: {op.confidence:.1f})"
+                            for op in sorted(
+                                opinions,
+                                key=lambda o: o.confidence,
+                                reverse=True,
+                            )[:5]
+                        )
+
+            # --- Gather thought history ---
+            thought_history = ""
+            if self.amem:
+                with contextlib.suppress(Exception):
+                    past_thoughts = await self.amem.recall("autonomous thought reflection", limit=3)
+                    thought_history = "\n".join(
+                        f"- {z.content[:200]}"
+                        for z in past_thoughts
+                        if z.metadata.get("type") == "thought"
+                    )
+
+            # --- Think ---
             thought, mood, intensity = await thinker.think(
                 memory_context=memory_context,
                 mood_context=mood_context,
+                personality_context=personality_context,
+                goals_context=goals_context,
+                opinions_context=opinions_context,
+                thought_history=thought_history,
             )
 
-            # Store thought as memory
+            # Store thought as memory with rich metadata
             if self.amem:
                 with contextlib.suppress(Exception):
                     await self.amem.remember(
                         f"Autonomous thought: {thought.content}",
-                        metadata={"type": "thought", "source": "autonomous"},
+                        metadata={
+                            "type": "thought",
+                            "source": "autonomous",
+                            "topic": thought.metadata.get("topic", ""),
+                            "follow_up": thought.metadata.get("follow_up", ""),
+                        },
                     )
 
             # Update mood

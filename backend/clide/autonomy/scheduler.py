@@ -28,6 +28,8 @@ class ThinkingScheduler:
         self._task: asyncio.Task[None] | None = None
         self._running = False
         self._cycle_count = 0
+        self._thinking_in_progress = False
+        self._skipped_count = 0
 
     @property
     def is_running(self) -> bool:
@@ -36,6 +38,10 @@ class ThinkingScheduler:
     @property
     def cycle_count(self) -> int:
         return self._cycle_count
+
+    @property
+    def skipped_count(self) -> int:
+        return self._skipped_count
 
     def set_callback(self, callback: Callable[[], Coroutine[Any, Any, None]]) -> None:
         """Set the callback to run on each thinking cycle."""
@@ -65,21 +71,39 @@ class ThinkingScheduler:
         logger.info("Thinking scheduler stopped")
 
     async def trigger_now(self) -> None:
-        """Trigger an immediate thinking cycle."""
-        if self._callback:
+        """Trigger an immediate thinking cycle (skipped if one is already running)."""
+        if not self._callback:
+            return
+        if self._thinking_in_progress:
+            logger.info("Skipping manual trigger - thinking cycle already in progress")
+            self._skipped_count += 1
+            return
+        self._thinking_in_progress = True
+        try:
             await self._callback()
             self._cycle_count += 1
+        finally:
+            self._thinking_in_progress = False
 
     async def _run_loop(self) -> None:
         """Main loop that fires the callback at intervals."""
         while self._running:
             try:
                 if self._running and self._callback:
-                    await self._callback()
-                    self._cycle_count += 1
+                    if self._thinking_in_progress:
+                        logger.info("Skipping thinking cycle - previous cycle still in progress")
+                        self._skipped_count += 1
+                    else:
+                        self._thinking_in_progress = True
+                        try:
+                            await self._callback()
+                            self._cycle_count += 1
+                        finally:
+                            self._thinking_in_progress = False
                 await asyncio.sleep(self.interval_seconds)
             except asyncio.CancelledError:
                 break
             except Exception:
                 logger.exception("Error in thinking cycle")
+                self._thinking_in_progress = False
                 await asyncio.sleep(self.interval_seconds)  # Back off on error

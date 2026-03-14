@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from clide.core.llm import LLMConfig, _build_model_name, stream_completion
+from clide.core.llm import LLMConfig, _build_model_name, _llm_semaphore, stream_completion
 
 
 class MockChunk:
@@ -28,6 +29,16 @@ class TestBuildModelName:
     def test_build_model_name_other_provider(self) -> None:
         config = LLMConfig(provider="openai", model="gpt-4")
         assert _build_model_name(config) == "openai/gpt-4"
+
+
+class TestLLMConfig:
+    def test_default_timeout_seconds(self) -> None:
+        config = LLMConfig()
+        assert config.timeout_seconds == 600.0
+
+    def test_custom_timeout_seconds(self) -> None:
+        config = LLMConfig(timeout_seconds=30.0)
+        assert config.timeout_seconds == 30.0
 
 
 class TestStreamCompletion:
@@ -65,3 +76,55 @@ class TestStreamCompletion:
                 chunks.append(chunk)
 
         assert chunks == ["Hello", " world"]
+
+    @pytest.mark.asyncio
+    async def test_stream_completion_timeout(self) -> None:
+        config = LLMConfig(timeout_seconds=0.01)
+        messages = [{"role": "user", "content": "hello"}]
+
+        async def slow_completion(**kwargs: object) -> object:
+            await asyncio.sleep(10)
+            return mock_stream(["late"])
+
+        with patch("clide.core.llm.litellm") as mock_litellm:
+            mock_litellm.acompletion = slow_completion
+
+            with pytest.raises(TimeoutError):
+                async for _ in stream_completion(messages, config):
+                    pass
+
+    @pytest.mark.asyncio
+    async def test_semaphore_limits_concurrency(self) -> None:
+        """Verify that at most 2 LLM calls run concurrently."""
+        config = LLMConfig()
+        messages = [{"role": "user", "content": "hello"}]
+
+        max_concurrent = 0
+        current_concurrent = 0
+        lock = asyncio.Lock()
+
+        async def tracked_completion(**kwargs: object) -> AsyncIterator[MockChunk]:
+            nonlocal max_concurrent, current_concurrent
+            async with lock:
+                current_concurrent += 1
+                if current_concurrent > max_concurrent:
+                    max_concurrent = current_concurrent
+            await asyncio.sleep(0.05)
+            async with lock:
+                current_concurrent -= 1
+            return mock_stream(["ok"])  # type: ignore[return-value]
+
+        with patch("clide.core.llm.litellm") as mock_litellm:
+            mock_litellm.acompletion = AsyncMock(side_effect=tracked_completion)
+
+            async def consume(idx: int) -> None:
+                async for _ in stream_completion(messages, config):
+                    pass
+
+            # Launch 4 concurrent calls; semaphore should limit to 2
+            await asyncio.gather(consume(0), consume(1), consume(2), consume(3))
+
+        assert max_concurrent <= 2
+
+    def test_semaphore_is_module_level(self) -> None:
+        assert isinstance(_llm_semaphore, asyncio.Semaphore)

@@ -18,11 +18,16 @@ async def fake_stream_completion(
         yield chunk
 
 
-def _make_zettel_mock(summary: str = "test memory", content: str = "full content") -> MagicMock:
-    """Create a mock Zettel with summary and content."""
+def _make_zettel_mock(
+    summary: str = "test memory",
+    content: str = "full content",
+    metadata: dict[str, str] | None = None,
+) -> MagicMock:
+    """Create a mock Zettel with summary, content, and metadata."""
     z = MagicMock()
     z.summary = summary
     z.content = content
+    z.metadata = metadata or {}
     return z
 
 
@@ -35,16 +40,24 @@ class TestAgentCore:
         amem = MagicMock()
         character = MagicMock()
         cost_tracker = MagicMock()
-        agent = AgentCore(amem=amem, character=character, cost_tracker=cost_tracker)
+        goal_manager = MagicMock()
+        agent = AgentCore(
+            amem=amem,
+            character=character,
+            cost_tracker=cost_tracker,
+            goal_manager=goal_manager,
+        )
         assert agent.amem is amem
         assert agent.character is character
         assert agent.cost_tracker is cost_tracker
+        assert agent.goal_manager is goal_manager
 
     def test_init_without_deps_defaults_to_none(self) -> None:
         agent = AgentCore()
         assert agent.amem is None
         assert agent.character is None
         assert agent.cost_tracker is None
+        assert agent.goal_manager is None
 
     @pytest.mark.asyncio
     async def test_process_message_transitions_to_conversing_and_back(self) -> None:
@@ -290,6 +303,7 @@ class TestAutonomousThink:
         agent = AgentCore()
         mock_thought = MagicMock()
         mock_thought.content = "I wonder about the stars"
+        mock_thought.metadata = {"topic": "stars", "follow_up": ""}
 
         with patch("clide.autonomy.thinker.Thinker") as mock_thinker_cls:
             thinker_instance = MagicMock()
@@ -310,6 +324,7 @@ class TestAutonomousThink:
 
         mock_thought = MagicMock()
         mock_thought.content = "hmm"
+        mock_thought.metadata = {"topic": "", "follow_up": ""}
 
         async def capturing_think(**kwargs: object) -> tuple[MagicMock, str, float]:
             states_during.append(agent.get_state())
@@ -353,15 +368,16 @@ class TestAutonomousThink:
         assert agent.get_state() == AgentState.IDLE
 
     @pytest.mark.asyncio
-    async def test_stores_thought_to_memory(self) -> None:
+    async def test_stores_thought_to_memory_with_rich_metadata(self) -> None:
         amem = MagicMock()
-        amem.list_recent = AsyncMock(return_value=[])
+        amem.recall = AsyncMock(return_value=[])
         amem.remember = AsyncMock()
 
         agent = AgentCore(amem=amem)
 
         mock_thought = MagicMock()
         mock_thought.content = "Deep reflection"
+        mock_thought.metadata = {"topic": "philosophy", "follow_up": "explore more"}
 
         with patch("clide.autonomy.thinker.Thinker") as mock_thinker_cls:
             thinker_instance = MagicMock()
@@ -374,18 +390,25 @@ class TestAutonomousThink:
         call_args = amem.remember.call_args
         assert "Deep reflection" in call_args[0][0]
         assert call_args[1]["metadata"]["type"] == "thought"
+        assert call_args[1]["metadata"]["source"] == "autonomous"
+        assert call_args[1]["metadata"]["topic"] == "philosophy"
+        assert call_args[1]["metadata"]["follow_up"] == "explore more"
 
     @pytest.mark.asyncio
     async def test_updates_character_mood(self) -> None:
         character = MagicMock()
         character.mood = MagicMock()
         character.mood.describe.return_value = "feeling neutral"
+        character.build_personality_prompt.return_value = ""
+        character.opinions = MagicMock()
+        character.opinions.all.return_value = []
         character.save = AsyncMock()
 
         agent = AgentCore(character=character)
 
         mock_thought = MagicMock()
         mock_thought.content = "Interesting"
+        mock_thought.metadata = {"topic": "", "follow_up": ""}
 
         with patch("clide.autonomy.thinker.Thinker") as mock_thinker_cls:
             thinker_instance = MagicMock()
@@ -398,16 +421,220 @@ class TestAutonomousThink:
         character.save.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_gathers_memory_context_for_thinking(self) -> None:
-        zettel = _make_zettel_mock(summary="Recent chat about AI")
+    async def test_uses_semantic_recall_instead_of_list_recent(self) -> None:
+        """Verify that autonomous_think uses amem.recall (semantic) not list_recent."""
         amem = MagicMock()
-        amem.list_recent = AsyncMock(return_value=[zettel])
+        amem.recall = AsyncMock(return_value=[])
         amem.remember = AsyncMock()
 
         agent = AgentCore(amem=amem)
 
         mock_thought = MagicMock()
         mock_thought.content = "thought"
+        mock_thought.metadata = {"topic": "", "follow_up": ""}
+
+        with patch("clide.autonomy.thinker.Thinker") as mock_thinker_cls:
+            thinker_instance = MagicMock()
+            thinker_instance.think = AsyncMock(return_value=(mock_thought, "neutral", 0.5))
+            mock_thinker_cls.return_value = thinker_instance
+
+            await agent.autonomous_think()
+
+        # recall should be called (for thought history + memory context)
+        assert amem.recall.await_count >= 1
+        # list_recent should NOT be called
+        amem.list_recent.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_gathers_personality_context(self) -> None:
+        character = MagicMock()
+        character.mood = MagicMock()
+        character.mood.describe.return_value = "feeling curious"
+        character.build_personality_prompt.return_value = "You are deeply curious."
+        character.opinions = MagicMock()
+        character.opinions.all.return_value = []
+        character.save = AsyncMock()
+
+        agent = AgentCore(character=character)
+
+        mock_thought = MagicMock()
+        mock_thought.content = "thought"
+        mock_thought.metadata = {"topic": "", "follow_up": ""}
+
+        captured_kwargs: dict[str, object] = {}
+
+        async def capturing_think(**kwargs: object) -> tuple[MagicMock, str, float]:
+            captured_kwargs.update(kwargs)
+            return mock_thought, "neutral", 0.5
+
+        with patch("clide.autonomy.thinker.Thinker") as mock_thinker_cls:
+            thinker_instance = MagicMock()
+            thinker_instance.think = capturing_think
+            mock_thinker_cls.return_value = thinker_instance
+
+            await agent.autonomous_think()
+
+        assert "You are deeply curious." in str(captured_kwargs.get("personality_context", ""))
+
+    @pytest.mark.asyncio
+    async def test_gathers_opinions_context(self) -> None:
+        from clide.character.opinions import Opinion
+
+        character = MagicMock()
+        character.mood = MagicMock()
+        character.mood.describe.return_value = "feeling neutral"
+        character.build_personality_prompt.return_value = ""
+        character.opinions = MagicMock()
+        character.opinions.all.return_value = [
+            Opinion(topic="AI safety", stance="very important", confidence=0.9),
+        ]
+        character.save = AsyncMock()
+
+        agent = AgentCore(character=character)
+
+        mock_thought = MagicMock()
+        mock_thought.content = "thought"
+        mock_thought.metadata = {"topic": "", "follow_up": ""}
+
+        captured_kwargs: dict[str, object] = {}
+
+        async def capturing_think(**kwargs: object) -> tuple[MagicMock, str, float]:
+            captured_kwargs.update(kwargs)
+            return mock_thought, "neutral", 0.5
+
+        with patch("clide.autonomy.thinker.Thinker") as mock_thinker_cls:
+            thinker_instance = MagicMock()
+            thinker_instance.think = capturing_think
+            mock_thinker_cls.return_value = thinker_instance
+
+            await agent.autonomous_think()
+
+        opinions_ctx = str(captured_kwargs.get("opinions_context", ""))
+        assert "AI safety" in opinions_ctx
+        assert "very important" in opinions_ctx
+
+    @pytest.mark.asyncio
+    async def test_gathers_goals_context(self) -> None:
+        goal_manager = MagicMock()
+        mock_goal = MagicMock()
+        mock_goal.description = "Learn about astronomy"
+        mock_goal.progress = 0.3
+        goal_manager.get_active = AsyncMock(return_value=[mock_goal])
+
+        agent = AgentCore(goal_manager=goal_manager)
+
+        mock_thought = MagicMock()
+        mock_thought.content = "thought"
+        mock_thought.metadata = {"topic": "", "follow_up": ""}
+
+        captured_kwargs: dict[str, object] = {}
+
+        async def capturing_think(**kwargs: object) -> tuple[MagicMock, str, float]:
+            captured_kwargs.update(kwargs)
+            return mock_thought, "neutral", 0.5
+
+        with patch("clide.autonomy.thinker.Thinker") as mock_thinker_cls:
+            thinker_instance = MagicMock()
+            thinker_instance.think = capturing_think
+            mock_thinker_cls.return_value = thinker_instance
+
+            await agent.autonomous_think()
+
+        goals_ctx = str(captured_kwargs.get("goals_context", ""))
+        assert "Learn about astronomy" in goals_ctx
+
+    @pytest.mark.asyncio
+    async def test_gathers_thought_history(self) -> None:
+        past_thought = _make_zettel_mock(
+            content="Autonomous thought: I was pondering the nature of consciousness",
+            metadata={"type": "thought"},
+        )
+        amem = MagicMock()
+        amem.recall = AsyncMock(return_value=[past_thought])
+        amem.remember = AsyncMock()
+
+        agent = AgentCore(amem=amem)
+
+        mock_thought = MagicMock()
+        mock_thought.content = "new thought"
+        mock_thought.metadata = {"topic": "", "follow_up": ""}
+
+        captured_kwargs: dict[str, object] = {}
+
+        async def capturing_think(**kwargs: object) -> tuple[MagicMock, str, float]:
+            captured_kwargs.update(kwargs)
+            return mock_thought, "neutral", 0.5
+
+        with patch("clide.autonomy.thinker.Thinker") as mock_thinker_cls:
+            thinker_instance = MagicMock()
+            thinker_instance.think = capturing_think
+            mock_thinker_cls.return_value = thinker_instance
+
+            await agent.autonomous_think()
+
+        thought_hist = str(captured_kwargs.get("thought_history", ""))
+        assert "pondering the nature of consciousness" in thought_hist
+
+    @pytest.mark.asyncio
+    async def test_uses_follow_up_from_previous_thought_as_query(self) -> None:
+        """If a previous thought has a follow_up, use it as the recall query."""
+        past_thought = _make_zettel_mock(
+            content="Autonomous thought: pondering",
+            metadata={"type": "thought", "follow_up": "explore fractals", "topic": "math"},
+        )
+        amem = MagicMock()
+        amem.recall = AsyncMock(return_value=[past_thought])
+        amem.remember = AsyncMock()
+
+        agent = AgentCore(amem=amem)
+
+        mock_thought = MagicMock()
+        mock_thought.content = "thought"
+        mock_thought.metadata = {"topic": "", "follow_up": ""}
+
+        with patch("clide.autonomy.thinker.Thinker") as mock_thinker_cls:
+            thinker_instance = MagicMock()
+            thinker_instance.think = AsyncMock(return_value=(mock_thought, "neutral", 0.5))
+            mock_thinker_cls.return_value = thinker_instance
+
+            await agent.autonomous_think()
+
+        # The second recall call should use "explore fractals" as query
+        recall_calls = amem.recall.call_args_list
+        queries = [call[0][0] for call in recall_calls]
+        assert "explore fractals" in queries
+
+    @pytest.mark.asyncio
+    async def test_still_works_without_any_deps(self) -> None:
+        """Backward compat: autonomous_think works with no amem/character/goals."""
+        agent = AgentCore()
+
+        mock_thought = MagicMock()
+        mock_thought.content = "standalone thought"
+        mock_thought.metadata = {"topic": "", "follow_up": ""}
+
+        with patch("clide.autonomy.thinker.Thinker") as mock_thinker_cls:
+            thinker_instance = MagicMock()
+            thinker_instance.think = AsyncMock(return_value=(mock_thought, "neutral", 0.5))
+            mock_thinker_cls.return_value = thinker_instance
+
+            result = await agent.autonomous_think()
+
+        assert result is not None
+        assert result == ("standalone thought", "neutral", 0.5)
+
+    @pytest.mark.asyncio
+    async def test_gathers_memory_context_for_thinking(self) -> None:
+        zettel = _make_zettel_mock(summary="Recent chat about AI")
+        amem = MagicMock()
+        amem.recall = AsyncMock(return_value=[zettel])
+        amem.remember = AsyncMock()
+
+        agent = AgentCore(amem=amem)
+
+        mock_thought = MagicMock()
+        mock_thought.content = "thought"
+        mock_thought.metadata = {"topic": "", "follow_up": ""}
 
         captured_kwargs: dict[str, object] = {}
 

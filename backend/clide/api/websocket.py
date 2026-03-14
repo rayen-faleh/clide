@@ -73,7 +73,8 @@ class ConnectionManager:
         self.active_connections.append(websocket)
 
     def disconnect(self, websocket: WebSocket) -> None:
-        self.active_connections.remove(websocket)
+        if websocket in self.active_connections:
+            self.active_connections.remove(websocket)
 
     async def send_message(self, websocket: WebSocket, message: WSMessage) -> None:
         try:
@@ -148,8 +149,9 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                 )
 
     except WebSocketDisconnect:
-        manager.disconnect(websocket)
         logger.info("Client disconnected")
+    finally:
+        manager.disconnect(websocket)
 
 
 async def _handle_chat_message(
