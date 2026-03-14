@@ -125,25 +125,35 @@ class MemoryProcessor:
 
     async def _extract_info(self, content: str) -> dict[str, Any]:
         """Extract keywords, summary, tags from content via LLM."""
+        defaults: dict[str, Any] = {
+            "summary": content[:100],
+            "keywords": [],
+            "tags": [],
+            "context": "",
+            "importance": 0.5,
+        }
+
         prompt = EXTRACTION_PROMPT.format(content=content)
         messages = [{"role": "user", "content": prompt}]
 
-        response_text = ""
-        async for chunk in stream_completion(messages, self.llm_config):
-            response_text += chunk
+        try:
+            response_text = ""
+            async for chunk in stream_completion(messages, self.llm_config):
+                response_text += chunk
+        except Exception:
+            logger.warning("LLM call failed for extraction, using defaults", exc_info=True)
+            return defaults
+
+        if not response_text.strip():
+            logger.warning("Empty LLM response for extraction, using defaults")
+            return defaults
 
         try:
             result: dict[str, Any] = _extract_json(response_text)
             return result
         except json.JSONDecodeError:
             logger.warning("Failed to parse extraction response: %s", response_text[:200])
-            return {
-                "summary": content[:100],
-                "keywords": [],
-                "tags": [],
-                "context": "",
-                "importance": 0.5,
-            }
+            return defaults
 
     async def _find_links(
         self,
@@ -163,9 +173,17 @@ class MemoryProcessor:
         )
         messages = [{"role": "user", "content": prompt}]
 
-        response_text = ""
-        async for chunk in stream_completion(messages, self.llm_config):
-            response_text += chunk
+        try:
+            response_text = ""
+            async for chunk in stream_completion(messages, self.llm_config):
+                response_text += chunk
+        except Exception:
+            logger.warning("LLM call failed for link finding", exc_info=True)
+            return []
+
+        if not response_text.strip():
+            logger.debug("Empty LLM response for link finding, skipping links")
+            return []
 
         try:
             links_data: list[dict[str, object]] = _extract_json(response_text)
@@ -182,5 +200,8 @@ class MemoryProcessor:
                 if isinstance(link, dict) and "target_id" in link
             ]
         except (json.JSONDecodeError, KeyError):
-            logger.warning("Failed to parse links response: %s", response_text[:200])
+            logger.warning(
+                "Failed to parse links response: %s",
+                response_text[:200] if response_text else "(empty response)",
+            )
             return []
