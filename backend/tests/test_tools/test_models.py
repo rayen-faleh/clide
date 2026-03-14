@@ -80,20 +80,31 @@ class TestMCPServerConfig:
         cfg = MCPServerConfig(name="test", command="python -m test")
         assert cfg.name == "test"
         assert cfg.command == "python -m test"
+        assert cfg.transport == "stdio"
         assert cfg.args == []
         assert cfg.env == {}
         assert cfg.enabled is True
         assert cfg.description == ""
 
+    def test_transport_default_is_stdio(self) -> None:
+        cfg = MCPServerConfig(name="t", command="cmd")
+        assert cfg.transport == "stdio"
+
+    def test_transport_custom_value(self) -> None:
+        cfg = MCPServerConfig(name="t", command="cmd", transport="sse")
+        assert cfg.transport == "sse"
+
     def test_full_config(self) -> None:
         cfg = MCPServerConfig(
             name="search",
             command="node",
+            transport="stdio",
             args=["search-server.js"],
             env={"API_KEY": "secret"},
             enabled=False,
             description="Search server",
         )
+        assert cfg.transport == "stdio"
         assert cfg.args == ["search-server.js"]
         assert cfg.env == {"API_KEY": "secret"}
         assert cfg.enabled is False

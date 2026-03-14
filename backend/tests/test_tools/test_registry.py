@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -39,6 +39,24 @@ tools:
     return p
 
 
+@pytest.fixture
+def yaml_with_transport(tmp_path: Path) -> Path:
+    p = tmp_path / "tools.yaml"
+    p.write_text(
+        """\
+tools:
+  - name: search
+    transport: sse
+    command: python
+    args: []
+  - name: calc
+    command: node
+    args: []
+"""
+    )
+    return p
+
+
 class TestRegistryFromYaml:
     def test_empty_tools(self, empty_yaml: Path) -> None:
         registry = ToolRegistry.from_yaml(empty_yaml)
@@ -52,6 +70,30 @@ class TestRegistryFromYaml:
     def test_with_servers(self, valid_yaml: Path) -> None:
         registry = ToolRegistry.from_yaml(valid_yaml)
         assert registry.server_count == 2
+
+    def test_default_path_uses_project_root(self) -> None:
+        """Verify that from_yaml() with no args uses _PROJECT_ROOT."""
+        with patch("clide.tools.registry._PROJECT_ROOT", Path("/fake/root")):
+            registry = ToolRegistry.from_yaml()
+            # File won't exist so we get an empty registry, but the path is resolved
+            assert registry.server_count == 0
+
+    def test_transport_field_parsed_from_yaml(self, yaml_with_transport: Path) -> None:
+        """Verify transport field is read from YAML config."""
+        registry = ToolRegistry.from_yaml(yaml_with_transport)
+        assert registry.server_count == 2
+
+        # Check that the transport was parsed correctly
+        search_client = registry._servers["search"]
+        calc_client = registry._servers["calc"]
+        assert search_client.config.transport == "sse"
+        assert calc_client.config.transport == "stdio"  # default
+
+    def test_transport_defaults_to_stdio(self, valid_yaml: Path) -> None:
+        """Transport defaults to stdio when not specified in YAML."""
+        registry = ToolRegistry.from_yaml(valid_yaml)
+        for client in registry._servers.values():
+            assert client.config.transport == "stdio"
 
 
 class TestRegistryTools:

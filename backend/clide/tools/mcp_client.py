@@ -7,6 +7,7 @@ import contextlib
 import json
 import logging
 import os
+import shlex
 import uuid
 from typing import Any
 
@@ -26,6 +27,7 @@ class MCPClient:
         self._request_id = 0
         self._pending: dict[int, asyncio.Future[dict[str, Any]]] = {}
         self._reader_task: asyncio.Task[None] | None = None
+        self._stderr_task: asyncio.Task[None] | None = None
 
     @property
     def status(self) -> ToolStatus:
@@ -44,7 +46,9 @@ class MCPClient:
             return False
 
         try:
-            cmd_parts = self.config.command.split()
+            logger.info("Connecting to MCP server: %s", self.config.name)
+
+            cmd_parts = shlex.split(self.config.command)
             full_cmd = cmd_parts + self.config.args
 
             env = {**os.environ, **self.config.env} if self.config.env else None
@@ -58,6 +62,7 @@ class MCPClient:
             )
 
             self._reader_task = asyncio.create_task(self._read_responses())
+            self._stderr_task = asyncio.create_task(self._read_stderr())
 
             # Initialize
             await self._send_request(
@@ -86,6 +91,11 @@ class MCPClient:
                 ]
 
             self._status = ToolStatus.AVAILABLE
+            logger.info(
+                "MCP server %s connected: %d tools",
+                self.config.name,
+                len(self._tools),
+            )
             return True
 
         except Exception as e:
@@ -143,6 +153,11 @@ class MCPClient:
             with contextlib.suppress(asyncio.CancelledError):
                 await self._reader_task
 
+        if self._stderr_task:
+            self._stderr_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._stderr_task
+
         if self._process:
             self._process.terminate()
             try:
@@ -153,6 +168,7 @@ class MCPClient:
 
         self._status = ToolStatus.UNAVAILABLE
         self._tools = []
+        logger.info("MCP server %s disconnected", self.config.name)
 
     async def _send_request(self, method: str, params: dict[str, Any]) -> dict[str, Any] | None:
         """Send a JSON-RPC request and wait for response."""
@@ -222,3 +238,22 @@ class MCPClient:
                 break
             except Exception as e:
                 logger.debug("Error reading MCP response: %s", e)
+
+    async def _read_stderr(self) -> None:
+        """Read stderr to prevent buffer deadlock."""
+        if not self._process or not self._process.stderr:
+            return
+        while True:
+            try:
+                line = await self._process.stderr.readline()
+                if not line:
+                    break
+                logger.debug(
+                    "MCP server %s stderr: %s",
+                    self.config.name,
+                    line.decode().strip(),
+                )
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                break

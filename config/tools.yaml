@@ -1,5 +1,6 @@
 tools:
   - name: web_search
+    transport: stdio
     command: mcp-searxng
     args: []
     env:

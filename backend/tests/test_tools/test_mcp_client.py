@@ -30,6 +30,10 @@ class TestMCPClientInit:
         client = MCPClient(enabled_config)
         assert client.tools == []
 
+    def test_stderr_task_initially_none(self, enabled_config: MCPServerConfig) -> None:
+        client = MCPClient(enabled_config)
+        assert client._stderr_task is None
+
 
 class TestMCPClientConnect:
     async def test_connect_disabled_server(self, disabled_config: MCPServerConfig) -> None:
@@ -44,6 +48,25 @@ class TestMCPClientConnect:
             result = await client.connect()
         assert result is False
         assert client.status == ToolStatus.ERROR
+
+    async def test_connect_uses_shlex_split(self) -> None:
+        """Verify that shlex.split is used to parse the command string."""
+        config = MCPServerConfig(
+            name="shlex-test",
+            command='python -m "my module"',
+            args=["--flag"],
+        )
+        client = MCPClient(config)
+
+        with patch("asyncio.create_subprocess_exec", new_callable=AsyncMock) as mock_exec:
+            mock_exec.side_effect = OSError("intentional")
+            await client.connect()
+
+            # shlex.split('python -m "my module"') -> ["python", "-m", "my module"]
+            # + args ["--flag"] -> ["python", "-m", "my module", "--flag"]
+            mock_exec.assert_called_once()
+            call_args = mock_exec.call_args[0]
+            assert call_args == ("python", "-m", "my module", "--flag")
 
 
 class TestMCPClientCallTool:
@@ -66,13 +89,17 @@ class TestMCPClientDisconnect:
         client._process = mock_process
         client._status = ToolStatus.AVAILABLE
 
-        # Create a real cancelled task to simulate reader_task
+        # Create real cancelled tasks to simulate reader_task and stderr_task
         async def noop() -> None:
             await asyncio.sleep(100)
 
-        real_task = asyncio.create_task(noop())
-        real_task.cancel()
-        client._reader_task = real_task
+        reader_task = asyncio.create_task(noop())
+        reader_task.cancel()
+        client._reader_task = reader_task
+
+        stderr_task = asyncio.create_task(noop())
+        stderr_task.cancel()
+        client._stderr_task = stderr_task
 
         await client.disconnect()
 
@@ -80,3 +107,21 @@ class TestMCPClientDisconnect:
         assert client.tools == []
         assert client._process is None
         mock_process.terminate.assert_called_once()
+
+    async def test_disconnect_cancels_stderr_task(self, enabled_config: MCPServerConfig) -> None:
+        client = MCPClient(enabled_config)
+
+        async def noop() -> None:
+            await asyncio.sleep(100)
+
+        stderr_task = asyncio.create_task(noop())
+        client._stderr_task = stderr_task
+
+        mock_process = MagicMock()
+        mock_process.terminate = MagicMock()
+        mock_process.kill = MagicMock()
+        mock_process.wait = AsyncMock(return_value=0)
+        client._process = mock_process
+
+        await client.disconnect()
+        assert stderr_task.cancelled()

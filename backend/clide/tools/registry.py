@@ -8,6 +8,7 @@ from typing import Any
 
 import yaml
 
+from clide.config.settings import _PROJECT_ROOT
 from clide.tools.mcp_client import MCPClient
 from clide.tools.models import MCPServerConfig, ToolDefinition, ToolResult, ToolStatus
 
@@ -22,10 +23,10 @@ class ToolRegistry:
         self._tool_to_server: dict[str, str] = {}  # tool_name -> server_name
 
     @classmethod
-    def from_yaml(cls, path: str | Path = "config/tools.yaml") -> ToolRegistry:
+    def from_yaml(cls, path: str | Path | None = None) -> ToolRegistry:
         """Load tool configuration from YAML."""
         registry = cls()
-        resolved = Path(path)
+        resolved = Path(path) if path is not None else _PROJECT_ROOT / "config" / "tools.yaml"
 
         if not resolved.exists():
             logger.warning("Tools config not found: %s", resolved)
@@ -44,6 +45,7 @@ class ToolRegistry:
             config = MCPServerConfig(
                 name=tool_conf.get("name", ""),
                 command=tool_conf.get("command", ""),
+                transport=tool_conf.get("transport", "stdio"),
                 args=tool_conf.get("args", []),
                 env=tool_conf.get("env", {}),
                 enabled=tool_conf.get("enabled", True),

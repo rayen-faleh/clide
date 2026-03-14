@@ -52,6 +52,7 @@ class MCPServerConfig:
 
     name: str
     command: str  # e.g., "python -m clide.tools.web_search"
+    transport: str = "stdio"
     args: list[str] = field(default_factory=list)
     env: dict[str, str] = field(default_factory=dict)
     enabled: bool = True
