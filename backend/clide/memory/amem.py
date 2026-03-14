@@ -269,6 +269,41 @@ class AMem:
             )
             await db.commit()
 
+    async def get_recent_by_type(self, memory_type: str, limit: int = 5) -> list[Zettel]:
+        """Get recent zettels filtered by metadata type, ordered newest first."""
+        await self._ensure_initialized()
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                """SELECT * FROM zettels
+                   WHERE json_extract(metadata, '$.type') = ?
+                   ORDER BY created_at DESC LIMIT ?""",
+                (memory_type, limit),
+            )
+            rows = await cursor.fetchall()
+        return [self._row_to_zettel(row) for row in rows]
+
+    async def get_random(
+        self, limit: int = 3, exclude_ids: list[str] | None = None
+    ) -> list[Zettel]:
+        """Get random zettels for variety in context."""
+        await self._ensure_initialized()
+        exclude = exclude_ids or []
+        if exclude:
+            placeholders = ",".join("?" for _ in exclude)
+            query = (
+                f"SELECT * FROM zettels WHERE id NOT IN ({placeholders}) ORDER BY RANDOM() LIMIT ?"
+            )
+            params: list[str | int] = [*exclude, limit]
+        else:
+            query = "SELECT * FROM zettels ORDER BY RANDOM() LIMIT ?"
+            params = [limit]
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(query, params)
+            rows = await cursor.fetchall()
+        return [self._row_to_zettel(row) for row in rows]
+
     @staticmethod
     def _row_to_zettel(row: Any) -> Zettel:
         return Zettel(

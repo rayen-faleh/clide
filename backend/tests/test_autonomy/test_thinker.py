@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 import pytest
 
-from clide.autonomy.thinker import Thinker
+from clide.autonomy.thinker import THINKING_PROMPT, Thinker
 
 
 @pytest.fixture
@@ -217,3 +217,7 @@ class TestThinker:
             "neutral",
         ]:
             assert mood_name in prompt, f"Mood '{mood_name}' not found in prompt"
+
+    async def test_anti_repetition_instruction_in_prompt(self) -> None:
+        assert "Do NOT repeat" in THINKING_PROMPT
+        assert "PREVIOUS thoughts" in THINKING_PROMPT
