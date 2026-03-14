@@ -118,10 +118,7 @@ class Thinker:
                 if memory_context
                 else "No recent memories yet."
             ),
-            goals_context=(
-                f"Your active goals:\n"
-                f"{goals_context or '(none yet)'}"
-            ),
+            goals_context=(f"Your active goals:\n{goals_context or '(none yet)'}"),
             opinions_context=(
                 f"Your current opinions:\n{opinions_context}" if opinions_context else ""
             ),
