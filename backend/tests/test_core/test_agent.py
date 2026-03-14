@@ -778,3 +778,109 @@ class TestTimeAwareness:
     def test_format_age_naive_datetime(self) -> None:
         dt = datetime.now(UTC).replace(tzinfo=None) - timedelta(days=2)
         assert AgentCore._format_age(dt) == "2d ago"
+
+
+class TestProcessThoughtGoals:
+    """Tests for _process_thought_goals method."""
+
+    @pytest.mark.asyncio
+    async def test_creates_goal_when_new_goal_in_metadata(self) -> None:
+        goal_manager = MagicMock()
+        goal_manager.get_active = AsyncMock(return_value=[])
+        goal_manager.create = AsyncMock()
+
+        agent = AgentCore(goal_manager=goal_manager)
+
+        thought = MagicMock()
+        thought.metadata = {"new_goal": "Learn about quantum computing"}
+
+        await agent._process_thought_goals(thought)  # noqa: SLF001
+
+        goal_manager.create.assert_awaited_once_with("Learn about quantum computing")
+
+    @pytest.mark.asyncio
+    async def test_respects_max_active_goals(self) -> None:
+        goal_manager = MagicMock()
+        # Return 5 active goals so we're at the max
+        goal_manager.get_active = AsyncMock(return_value=[MagicMock() for _ in range(5)])
+        goal_manager.create = AsyncMock()
+
+        agent = AgentCore(goal_manager=goal_manager)
+
+        thought = MagicMock()
+        thought.metadata = {"new_goal": "Should not be created"}
+
+        await agent._process_thought_goals(thought)  # noqa: SLF001
+
+        goal_manager.create.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_updates_existing_goal(self) -> None:
+        mock_goal = MagicMock()
+        mock_goal.id = "goal-123"
+        mock_goal.description = "Learn about astronomy"
+
+        goal_manager = MagicMock()
+        goal_manager.get_active = AsyncMock(return_value=[mock_goal])
+        goal_manager.update = AsyncMock()
+
+        agent = AgentCore(goal_manager=goal_manager)
+
+        import json
+
+        updates = [
+            {
+                "description": "Learn about astronomy",
+                "progress": 0.5,
+                "status": "completed",
+                "reason": "Discussed star formation",
+            }
+        ]
+        thought = MagicMock()
+        thought.metadata = {"goal_updates": json.dumps(updates)}
+
+        await agent._process_thought_goals(thought)  # noqa: SLF001
+
+        from clide.autonomy.models import GoalStatus
+
+        goal_manager.update.assert_awaited_once_with(
+            "goal-123",
+            progress=0.5,
+            status=GoalStatus.COMPLETED,
+            notes="Discussed star formation",
+        )
+
+    @pytest.mark.asyncio
+    async def test_no_error_when_goal_manager_is_none(self) -> None:
+        agent = AgentCore()  # No goal_manager
+        assert agent.goal_manager is None
+
+        thought = MagicMock()
+        thought.metadata = {"new_goal": "Should not crash"}
+
+        # Should not raise
+        await agent._process_thought_goals(thought)  # noqa: SLF001
+
+    @pytest.mark.asyncio
+    async def test_post_response_nudges_goal_progress(self) -> None:
+        mock_goal = MagicMock()
+        mock_goal.id = "goal-456"
+        mock_goal.description = "Learn about machine learning algorithms"
+        mock_goal.progress = 0.2
+
+        goal_manager = MagicMock()
+        goal_manager.get_active = AsyncMock(return_value=[mock_goal])
+        goal_manager.update = AsyncMock()
+
+        agent = AgentCore(goal_manager=goal_manager)
+
+        # Conversation about machine learning (matches "machine", "learning", "algorithms")
+        await agent._post_response_tasks(
+            "Tell me about machine learning algorithms",
+            "Machine learning algorithms include decision trees and neural networks.",
+        )
+
+        goal_manager.update.assert_awaited_once_with(
+            "goal-456",
+            progress=0.25,  # 0.2 + 0.05
+        )

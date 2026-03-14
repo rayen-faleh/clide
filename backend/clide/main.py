@@ -105,8 +105,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     )
     set_agent_core(agent_core)
 
-    # Goal manager (instantiated for future use)
-    GoalManager()
+    # Goal manager
+    goal_manager = GoalManager()
+    agent_core.goal_manager = goal_manager
 
     # Autonomy scheduler
     scheduler = ThinkingScheduler(
