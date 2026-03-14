@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+
 from clide.core.prompts import DEFAULT_SYSTEM_PROMPT, build_system_prompt
 
 
 class TestPrompts:
-    def test_default_prompt(self) -> None:
+    def test_default_prompt_contains_current_time(self) -> None:
         result = build_system_prompt()
-        assert result == DEFAULT_SYSTEM_PROMPT
         assert "Clide" in result
+        assert "Current date and time:" in result
 
     def test_build_with_personality(self) -> None:
         result = build_system_prompt(personality_additions="Be extra funny.")
@@ -29,3 +31,22 @@ class TestPrompts:
         assert DEFAULT_SYSTEM_PROMPT in result
         assert "Be witty." in result
         assert "User is a developer." in result
+
+    def test_build_with_born_at_shows_age(self) -> None:
+        born = datetime.now(UTC) - timedelta(days=3, hours=2)
+        result = build_system_prompt(agent_born_at=born)
+        assert "You have been alive for 3 days and 2 hours." in result
+
+    def test_build_with_born_at_hours_only(self) -> None:
+        born = datetime.now(UTC) - timedelta(hours=5, minutes=30)
+        result = build_system_prompt(agent_born_at=born)
+        assert "You have been alive for 5 hours and 30 minutes." in result
+
+    def test_build_with_naive_born_at(self) -> None:
+        born = datetime.now(UTC).replace(tzinfo=None) - timedelta(days=1)
+        result = build_system_prompt(agent_born_at=born)
+        assert "You have been alive for" in result
+
+    def test_build_without_born_at_has_no_age(self) -> None:
+        result = build_system_prompt()
+        assert "You have been alive" not in result

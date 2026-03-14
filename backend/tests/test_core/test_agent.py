@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -31,6 +32,7 @@ def _make_zettel_mock(
     z.summary = summary
     z.content = content
     z.metadata = metadata or {}
+    z.created_at = datetime.now(UTC)
     return z
 
 
@@ -527,6 +529,7 @@ class TestAutonomousThink:
         mock_goal = MagicMock()
         mock_goal.description = "Learn about astronomy"
         mock_goal.progress = 0.3
+        mock_goal.created_at = datetime.now(UTC)
         goal_manager.get_active = AsyncMock(return_value=[mock_goal])
 
         agent = AgentCore(goal_manager=goal_manager)
@@ -729,3 +732,36 @@ class TestConversationStorePersistence:
         assert agent.conversation_history == []
         messages = await store.get_recent()
         assert messages == []
+
+
+class TestTimeAwareness:
+    """Tests for time awareness features."""
+
+    def test_born_at_stored(self) -> None:
+        born = datetime.now(UTC)
+        agent = AgentCore(born_at=born)
+        assert agent.born_at is born
+
+    def test_born_at_defaults_to_none(self) -> None:
+        agent = AgentCore()
+        assert agent.born_at is None
+
+    def test_format_age_days(self) -> None:
+        dt = datetime.now(UTC) - timedelta(days=5, hours=3)
+        assert AgentCore._format_age(dt) == "5d ago"
+
+    def test_format_age_hours(self) -> None:
+        dt = datetime.now(UTC) - timedelta(hours=3, minutes=20)
+        assert AgentCore._format_age(dt) == "3h ago"
+
+    def test_format_age_minutes(self) -> None:
+        dt = datetime.now(UTC) - timedelta(minutes=15)
+        assert AgentCore._format_age(dt) == "15m ago"
+
+    def test_format_age_just_now(self) -> None:
+        dt = datetime.now(UTC) - timedelta(seconds=10)
+        assert AgentCore._format_age(dt) == "just now"
+
+    def test_format_age_naive_datetime(self) -> None:
+        dt = datetime.now(UTC).replace(tzinfo=None) - timedelta(days=2)
+        assert AgentCore._format_age(dt) == "2d ago"

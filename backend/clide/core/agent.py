@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import logging
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from clide.api.schemas import AgentState
@@ -40,6 +41,7 @@ class AgentCore:
         cost_tracker: CostTracker | None = None,
         goal_manager: GoalManager | None = None,
         conversation_store: ConversationStore | None = None,
+        born_at: datetime | None = None,
     ) -> None:
         self.state_machine = StateMachine(initial_state=AgentState.IDLE)
         self.llm_config = llm_config or LLMConfig()
@@ -52,6 +54,23 @@ class AgentCore:
         self.goal_manager = goal_manager
         self.conversation_store = conversation_store
         self._history_loaded = False
+        self.born_at = born_at
+
+    @staticmethod
+    def _format_age(dt: datetime) -> str:
+        """Format a datetime as a human-readable relative age string."""
+        now = datetime.now(UTC)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=UTC)
+        age = now - dt
+        if age.days > 0:
+            return f"{age.days}d ago"
+        elif age.seconds >= 3600:
+            return f"{age.seconds // 3600}h ago"
+        elif age.seconds >= 60:
+            return f"{age.seconds // 60}m ago"
+        else:
+            return "just now"
 
     def get_state(self) -> AgentState:
         """Get current agent state."""
@@ -100,7 +119,8 @@ class AgentCore:
                 if relevant:
                     logger.info("Recalled %d memories for context", len(relevant))
                     memory_context = "\n".join(
-                        f"- {z.summary or z.content[:100]}" for z in relevant
+                        f"- {z.summary or z.content[:100]} [{self._format_age(z.created_at)}]"
+                        for z in relevant
                     )
                 else:
                     logger.debug("No memories found")
@@ -116,6 +136,7 @@ class AgentCore:
             self.system_prompt,
             personality_additions=personality,
             memory_context=memory_context,
+            agent_born_at=self.born_at,
         )
 
         # Build messages for LLM
@@ -242,7 +263,8 @@ class AgentCore:
                 with contextlib.suppress(Exception):
                     relevant = await self.amem.recall(topic_query, limit=10)
                     memory_context = "\n".join(
-                        f"- {z.summary or z.content[:100]}" for z in relevant
+                        f"- {z.summary or z.content[:100]} [{self._format_age(z.created_at)}]"
+                        for z in relevant
                     )
 
             # --- Gather mood context ---
@@ -262,7 +284,9 @@ class AgentCore:
                     active_goals = await self.goal_manager.get_active()
                     if active_goals:
                         goals_context = "\n".join(
-                            f"- {g.description} (progress: {g.progress:.0%})" for g in active_goals
+                            f"- {g.description} (progress: {g.progress:.0%},"
+                            f" created {self._format_age(g.created_at)})"
+                            for g in active_goals
                         )
 
             # --- Gather opinions context ---
@@ -272,7 +296,9 @@ class AgentCore:
                     opinions = self.character.opinions.all()
                     if opinions:
                         opinions_context = "\n".join(
-                            f"- On {op.topic}: {op.stance} (confidence: {op.confidence:.1f})"
+                            f"- On {op.topic}: {op.stance}"
+                            f" (confidence: {op.confidence:.1f},"
+                            f" formed {self._format_age(op.formed_at)})"
                             for op in sorted(
                                 opinions,
                                 key=lambda o: o.confidence,
@@ -286,7 +312,7 @@ class AgentCore:
                 with contextlib.suppress(Exception):
                     past_thoughts = await self.amem.recall("autonomous thought reflection", limit=3)
                     thought_history = "\n".join(
-                        f"- {z.content[:200]}"
+                        f"- {z.content[:200]} [{self._format_age(z.created_at)}]"
                         for z in past_thoughts
                         if z.metadata.get("type") == "thought"
                     )

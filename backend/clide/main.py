@@ -5,6 +5,8 @@ from __future__ import annotations
 import logging
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
+from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -27,6 +29,17 @@ from clide.core.prompts import DEFAULT_SYSTEM_PROMPT
 from clide.memory.amem import AMem
 
 logger = logging.getLogger(__name__)
+
+
+def _load_or_create_born_at() -> datetime:
+    """Load or create the agent's birth timestamp."""
+    born_file = Path("data/born_at.txt")
+    born_file.parent.mkdir(parents=True, exist_ok=True)
+    if born_file.exists():
+        return datetime.fromisoformat(born_file.read_text().strip())
+    now = datetime.now(UTC)
+    born_file.write_text(now.isoformat())
+    return now
 
 
 @asynccontextmanager
@@ -80,6 +93,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     set_conversation_store(conversation_store)
 
     # Agent core — pass all deps
+    born_at = _load_or_create_born_at()
     agent_core = AgentCore(
         llm_config=llm_config,
         system_prompt=settings.agent.system_prompt or DEFAULT_SYSTEM_PROMPT,
@@ -87,6 +101,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
         character=character,
         cost_tracker=cost_tracker,
         conversation_store=conversation_store,
+        born_at=born_at,
     )
     set_agent_core(agent_core)
 

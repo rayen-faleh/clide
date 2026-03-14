@@ -106,7 +106,20 @@ class MoodState:
             intensity_word = "moderately"
         else:
             intensity_word = "very"
-        return f"You are currently feeling {intensity_word} {self.mood}."
+        now = datetime.now(UTC)
+        dt = self.updated_at
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=UTC)
+        age = now - dt
+        if age.days > 0:
+            time_ctx = f"for {age.days}d"
+        elif age.seconds >= 3600:
+            time_ctx = f"for {age.seconds // 3600}h"
+        elif age.seconds >= 60:
+            time_ctx = f"for {age.seconds // 60}m"
+        else:
+            time_ctx = "just now"
+        return f"You are currently feeling {intensity_word} {self.mood} ({time_ctx})."
 
     def to_dict(self) -> dict[str, str | float]:
         """Serialize mood state."""
