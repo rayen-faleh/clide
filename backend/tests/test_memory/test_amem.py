@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import json
+import uuid
+from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
+import aiosqlite
 import pytest
 
 from clide.memory.amem import AMem
@@ -149,3 +153,100 @@ class TestAMem:
         linked = await amem.get_linked(z1.id)
         assert len(linked) == 1
         assert linked[0].id == z2.id
+
+
+async def _insert_zettel_with_type(
+    db_path: str, content: str, memory_type: str, created_at: datetime | None = None
+) -> str:
+    """Insert a zettel directly into SQLite with a given metadata type."""
+    zettel_id = str(uuid.uuid4())
+    now = created_at or datetime.utcnow()
+    metadata = json.dumps({"type": memory_type})
+    async with aiosqlite.connect(db_path) as db:
+        await db.execute(
+            """INSERT INTO zettels (id, content, summary, keywords, tags, context,
+               importance, access_count, metadata, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                zettel_id,
+                content,
+                "summary",
+                "[]",
+                "[]",
+                "",
+                0.5,
+                0,
+                metadata,
+                now.isoformat(),
+                now.isoformat(),
+            ),
+        )
+        await db.commit()
+    return zettel_id
+
+
+class TestGetRecentByType:
+    @pytest.mark.asyncio
+    async def test_get_recent_by_type(self, amem: AMem) -> None:
+        await amem._ensure_initialized()
+        await _insert_zettel_with_type(amem.db_path, "thought 1", "thought")
+        await _insert_zettel_with_type(amem.db_path, "thought 2", "thought")
+        await _insert_zettel_with_type(amem.db_path, "convo 1", "conversation")
+
+        results = await amem.get_recent_by_type("thought", limit=10)
+        assert len(results) == 2
+        assert all(
+            json.loads(r.metadata["type"]) == "thought"
+            if isinstance(r.metadata, str)
+            else r.metadata.get("type") == "thought"
+            for r in results
+        )
+
+    @pytest.mark.asyncio
+    async def test_get_recent_by_type_ordering(self, amem: AMem) -> None:
+        await amem._ensure_initialized()
+        now = datetime.utcnow()
+        await _insert_zettel_with_type(
+            amem.db_path, "older", "thought", created_at=now - timedelta(hours=2)
+        )
+        await _insert_zettel_with_type(amem.db_path, "newer", "thought", created_at=now)
+
+        results = await amem.get_recent_by_type("thought", limit=10)
+        assert len(results) == 2
+        assert results[0].content == "newer"
+        assert results[1].content == "older"
+
+    @pytest.mark.asyncio
+    async def test_get_recent_by_type_empty(self, amem: AMem) -> None:
+        await amem._ensure_initialized()
+        results = await amem.get_recent_by_type("nonexistent")
+        assert results == []
+
+
+class TestGetRandom:
+    @pytest.mark.asyncio
+    async def test_get_random(self, amem: AMem) -> None:
+        await amem._ensure_initialized()
+        await _insert_zettel_with_type(amem.db_path, "mem 1", "thought")
+        await _insert_zettel_with_type(amem.db_path, "mem 2", "thought")
+        await _insert_zettel_with_type(amem.db_path, "mem 3", "conversation")
+
+        results = await amem.get_random(limit=3)
+        assert len(results) == 3
+
+    @pytest.mark.asyncio
+    async def test_get_random_excludes_ids(self, amem: AMem) -> None:
+        await amem._ensure_initialized()
+        id1 = await _insert_zettel_with_type(amem.db_path, "mem 1", "thought")
+        await _insert_zettel_with_type(amem.db_path, "mem 2", "thought")
+
+        results = await amem.get_random(limit=10, exclude_ids=[id1])
+        result_ids = [r.id for r in results]
+        assert id1 not in result_ids
+        assert len(results) == 1
+
+    @pytest.mark.asyncio
+    async def test_get_random_empty_store(self, amem: AMem) -> None:
+        await amem._ensure_initialized()
+        results = await amem.get_random(limit=3)
+        assert results == []
