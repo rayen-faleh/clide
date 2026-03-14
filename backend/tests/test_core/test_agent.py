@@ -560,8 +560,16 @@ class TestAutonomousThink:
             content="Autonomous thought: I was pondering the nature of consciousness",
             metadata={"type": "thought"},
         )
+        random_mem = _make_zettel_mock(
+            summary="Random old memory",
+            content="Some old conversation",
+        )
+        random_mem.id = "rand-1"
+        past_thought.id = "thought-1"
         amem = MagicMock()
-        amem.recall = AsyncMock(return_value=[past_thought])
+        amem.get_recent_by_type = AsyncMock(return_value=[past_thought])
+        amem.get_random = AsyncMock(return_value=[random_mem])
+        amem.recall = AsyncMock(return_value=[])
         amem.remember = AsyncMock()
 
         agent = AgentCore(amem=amem)
@@ -585,6 +593,8 @@ class TestAutonomousThink:
 
         thought_hist = str(captured_kwargs.get("thought_history", ""))
         assert "pondering the nature of consciousness" in thought_hist
+        assert "[Recent thought]" in thought_hist
+        assert "[Past memory]" in thought_hist
 
     @pytest.mark.asyncio
     async def test_uses_follow_up_from_previous_thought_as_query(self) -> None:
@@ -593,8 +603,11 @@ class TestAutonomousThink:
             content="Autonomous thought: pondering",
             metadata={"type": "thought", "follow_up": "explore fractals", "topic": "math"},
         )
+        past_thought.id = "thought-1"
         amem = MagicMock()
-        amem.recall = AsyncMock(return_value=[past_thought])
+        amem.get_recent_by_type = AsyncMock(return_value=[past_thought])
+        amem.get_random = AsyncMock(return_value=[])
+        amem.recall = AsyncMock(return_value=[])
         amem.remember = AsyncMock()
 
         agent = AgentCore(amem=amem)
@@ -610,7 +623,7 @@ class TestAutonomousThink:
 
             await agent.autonomous_think()
 
-        # The second recall call should use "explore fractals" as query
+        # The recall call for memory_context should use "explore fractals" as query
         recall_calls = amem.recall.call_args_list
         queries = [call[0][0] for call in recall_calls]
         assert "explore fractals" in queries

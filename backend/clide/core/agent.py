@@ -248,17 +248,15 @@ class AgentCore:
             if self.amem:
                 # Try to find the last thought's follow_up or topic for continuity
                 with contextlib.suppress(Exception):
-                    past = await self.amem.recall("autonomous thought reflection", limit=3)
-                    for z in past:
-                        if z.metadata.get("type") == "thought":
-                            follow = z.metadata.get("follow_up", "")
-                            top = z.metadata.get("topic", "")
-                            if follow:
-                                topic_query = follow
-                                break
-                            if top:
-                                topic_query = top
-                                break
+                    last_thoughts = await self.amem.get_recent_by_type("thought", limit=1)
+                    if last_thoughts:
+                        last = last_thoughts[0]
+                        follow = last.metadata.get("follow_up", "")
+                        topic = last.metadata.get("topic", "")
+                        if follow:
+                            topic_query = follow
+                        elif topic:
+                            topic_query = topic
 
                 with contextlib.suppress(Exception):
                     relevant = await self.amem.recall(topic_query, limit=10)
@@ -310,12 +308,27 @@ class AgentCore:
             thought_history = ""
             if self.amem:
                 with contextlib.suppress(Exception):
-                    past_thoughts = await self.amem.recall("autonomous thought reflection", limit=3)
-                    thought_history = "\n".join(
-                        f"- {z.content[:200]} [{self._format_age(z.created_at)}]"
-                        for z in past_thoughts
-                        if z.metadata.get("type") == "thought"
-                    )
+                    # Get the 3 most recent thoughts directly from SQLite (guaranteed fresh)
+                    recent_thoughts = await self.amem.get_recent_by_type("thought", limit=3)
+                    recent_ids = [z.id for z in recent_thoughts]
+
+                    # Get 2 random memories for variety (exclude recent thoughts)
+                    random_memories = await self.amem.get_random(limit=2, exclude_ids=recent_ids)
+
+                    # Format with timestamps
+                    thought_parts: list[str] = []
+                    for z in recent_thoughts:
+                        thought_parts.append(
+                            f"- [Recent thought] {z.content[:200]}"
+                            f" [{self._format_age(z.created_at)}]"
+                        )
+                    for z in random_memories:
+                        thought_parts.append(
+                            f"- [Past memory] {z.summary or z.content[:100]}"
+                            f" [{self._format_age(z.created_at)}]"
+                        )
+
+                    thought_history = "\n".join(thought_parts)
 
             # --- Think ---
             thought, mood, intensity = await thinker.think(
