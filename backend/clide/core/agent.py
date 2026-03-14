@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json as json_mod
 import logging
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
@@ -195,6 +196,29 @@ class AgentCore:
             except Exception:
                 logger.warning("Failed to update character", exc_info=True)
 
+        # Lightweight goal review after conversation
+        if self.goal_manager:
+            try:
+                active_goals = await self.goal_manager.get_active()
+                for goal in active_goals:
+                    # Simple heuristic: if goal description words appear in the
+                    # conversation, nudge progress slightly
+                    goal_words = set(goal.description.lower().split())
+                    conversation_text = f"{content} {full_response}".lower()
+                    matching_words = sum(
+                        1 for w in goal_words if w in conversation_text and len(w) > 3
+                    )
+                    if matching_words >= 2:  # At least 2 significant words match
+                        new_progress = min(1.0, goal.progress + 0.05)  # Small nudge
+                        await self.goal_manager.update(goal.id, progress=new_progress)
+                        logger.debug(
+                            "Goal '%s' progress nudged to %.0f%% (conversation relevance)",
+                            goal.description[:50],
+                            new_progress * 100,
+                        )
+            except Exception:
+                logger.warning("Failed to review goals after conversation", exc_info=True)
+
     async def _post_thought_tasks(self, thought: object, mood: str, intensity: float) -> None:
         """Background tasks after thinking: store thought and update character."""
         if self.amem:
@@ -218,6 +242,79 @@ class AgentCore:
                 await self.character.save()
             except Exception:
                 logger.warning("Failed to update character after thinking", exc_info=True)
+
+    async def _process_thought_goals(self, thought: object) -> None:
+        """Process goal creation and updates from a thought's metadata."""
+        if not self.goal_manager:
+            return
+
+        meta = getattr(thought, "metadata", {}) or {}
+
+        # Create new goal if proposed
+        new_goal_desc = meta.get("new_goal", "")
+        if new_goal_desc and isinstance(new_goal_desc, str) and new_goal_desc.strip():
+            try:
+                active_goals = await self.goal_manager.get_active()
+                if len(active_goals) < 5:  # Max 5 active goals
+                    await self.goal_manager.create(new_goal_desc.strip())
+                    logger.info("Agent created new goal: %s", new_goal_desc[:80])
+                else:
+                    logger.debug("Goal creation skipped: already at max 5 active goals")
+            except Exception:
+                logger.warning("Failed to create goal", exc_info=True)
+
+        # Process goal updates
+        goal_updates_raw = meta.get("goal_updates", "")
+        if goal_updates_raw and isinstance(goal_updates_raw, str):
+            try:
+                updates = json_mod.loads(goal_updates_raw)
+                if isinstance(updates, list):
+                    active_goals = await self.goal_manager.get_active()
+                    for update in updates:
+                        if not isinstance(update, dict):
+                            continue
+                        desc = str(update.get("description", ""))
+                        if not desc:
+                            continue
+
+                        # Find the goal by description
+                        goal = next(
+                            (g for g in active_goals if g.description == desc),
+                            None,
+                        )
+                        if not goal:
+                            continue
+
+                        progress = update.get("progress")
+                        status_str = update.get("status", "")
+
+                        # Map status string to GoalStatus
+                        from clide.autonomy.models import GoalStatus
+
+                        status = None
+                        if status_str == "completed":
+                            status = GoalStatus.COMPLETED
+                        elif status_str == "abandoned":
+                            status = GoalStatus.ABANDONED
+
+                        notes = str(update.get("reason", ""))
+
+                        await self.goal_manager.update(
+                            goal.id,
+                            progress=float(progress) if progress is not None else None,
+                            status=status,
+                            notes=notes if notes else None,
+                        )
+                        logger.info(
+                            "Agent updated goal '%s': progress=%s, status=%s",
+                            desc[:50],
+                            progress,
+                            status_str or "unchanged",
+                        )
+            except (json_mod.JSONDecodeError, ValueError):
+                logger.warning("Failed to parse goal updates from thought metadata")
+            except Exception:
+                logger.warning("Failed to update goals", exc_info=True)
 
     async def autonomous_think(self) -> tuple[str, str, float] | None:
         """Run an autonomous thinking cycle.
@@ -340,6 +437,10 @@ class AgentCore:
                 thought_history=thought_history,
                 system_prompt=self.system_prompt,
             )
+
+            # Handle goal creation/updates from thought metadata
+            if self.goal_manager:
+                await self._process_thought_goals(thought)
 
             # Fire-and-forget: store thought and update character in background
             asyncio.create_task(self._post_thought_tasks(thought, mood, intensity))
