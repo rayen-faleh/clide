@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import AsyncIterator
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
@@ -15,6 +15,8 @@ from clide.api.schemas import (
     ChatResponseChunkPayload,
     ErrorPayload,
     StateChangePayload,
+    ToolCallPayload,
+    ToolResultPayload,
     WSMessage,
     WSMessageType,
 )
@@ -178,6 +180,35 @@ async def _handle_chat_message(
             ),
         )
         return
+
+    # Set tool event callback to broadcast to all clients
+    async def tool_event_handler(event: dict[str, Any]) -> None:
+        """Broadcast tool call and result events to all connected clients."""
+        # Broadcast tool call
+        await manager.broadcast(
+            WSMessage(
+                type=WSMessageType.TOOL_CALL,
+                payload=ToolCallPayload(
+                    tool_name=event.get("tool_name", ""),
+                    arguments=event.get("arguments", {}),
+                    call_id=event.get("call_id", ""),
+                ).model_dump(),
+            )
+        )
+        # Broadcast tool result
+        await manager.broadcast(
+            WSMessage(
+                type=WSMessageType.TOOL_RESULT,
+                payload=ToolResultPayload(
+                    call_id=event.get("call_id", ""),
+                    result=event.get("result"),
+                    error=event.get("error"),
+                ).model_dump(),
+            )
+        )
+
+    if hasattr(core, "set_tool_event_callback"):
+        core.set_tool_event_callback(tool_event_handler)
 
     # Stream response chunks
     try:

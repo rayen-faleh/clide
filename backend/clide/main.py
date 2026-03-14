@@ -27,6 +27,7 @@ from clide.core.cost import CostTracker
 from clide.core.llm import LLMConfig
 from clide.core.prompts import DEFAULT_SYSTEM_PROMPT
 from clide.memory.amem import AMem
+from clide.tools.registry import ToolRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -105,6 +106,23 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     )
     set_agent_core(agent_core)
 
+    # Tool registry
+    tool_registry = ToolRegistry.from_yaml()
+    connection_results = await tool_registry.connect_all()
+    logger.info(
+        "Tool registry initialized: %d servers, %d tools available",
+        tool_registry.server_count,
+        tool_registry.tool_count,
+    )
+    for server_name, connected in connection_results.items():
+        logger.info(
+            "  MCP server '%s': %s",
+            server_name,
+            "connected" if connected else "FAILED",
+        )
+
+    agent_core.tool_registry = tool_registry  # type: ignore[attr-defined]
+
     # Goal manager
     goal_manager = GoalManager()
     agent_core.goal_manager = goal_manager
@@ -162,6 +180,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
 
     # Shutdown
     logger.info("Saving character state...")
+    await tool_registry.disconnect_all()
+    logger.info("Tool registry disconnected")
     await scheduler.stop()
     logger.info("Scheduler stopped")
     await character.save()
