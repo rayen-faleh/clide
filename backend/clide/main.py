@@ -121,7 +121,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
             "connected" if connected else "FAILED",
         )
 
-    agent_core.tool_registry = tool_registry  # type: ignore[attr-defined]
+    agent_core.tool_registry = tool_registry
 
     # Goal manager
     goal_manager = GoalManager()
