@@ -6,6 +6,7 @@ import { useAgentStore } from '@/stores/agent'
 import type { WSMessage } from '@/types/messages'
 import ChatMessage from '@/components/ChatMessage.vue'
 import ChatInput from '@/components/ChatInput.vue'
+import ToolCard from '@/components/ToolCard.vue'
 
 const { status, connect, send, on, off } = useWebSocket()
 const { messages, isStreaming, sendMessage, handleResponseChunk } = useChat(send)
@@ -43,6 +44,15 @@ function handleThought(msg: WSMessage) {
   agentStore.handleThought(msg)
 }
 
+function handleToolCall(msg: WSMessage) {
+  agentStore.handleToolCall(msg)
+  scrollToBottom()
+}
+
+function handleToolResult(msg: WSMessage) {
+  agentStore.handleToolResult(msg)
+}
+
 onMounted(async () => {
   // Load persisted history if store is empty
   if (agentStore.messages.length === 0) {
@@ -69,6 +79,8 @@ onMounted(async () => {
   on('state_change', handleStateChange)
   on('mood_update', handleMoodUpdate)
   on('thought', handleThought)
+  on('tool_call', handleToolCall)
+  on('tool_result', handleToolResult)
 
   watch(status, (newStatus) => {
     agentStore.setConnected(newStatus === 'connected')
@@ -82,6 +94,8 @@ onUnmounted(() => {
   off('state_change', handleStateChange)
   off('mood_update', handleMoodUpdate)
   off('thought', handleThought)
+  off('tool_call', handleToolCall)
+  off('tool_result', handleToolResult)
 })
 </script>
 
@@ -95,7 +109,10 @@ onUnmounted(() => {
       <div v-if="messages.length === 0" class="empty-state">
         <p>Start a conversation with CLIDE</p>
       </div>
-      <ChatMessage v-for="msg in messages" :key="msg.id" :message="msg" />
+      <template v-for="item in messages" :key="item.id">
+        <ToolCard v-if="'type' in item && item.type === 'tool'" :event="item" />
+        <ChatMessage v-else :message="item" />
+      </template>
     </div>
     <ChatInput :disabled="status !== 'connected' || isStreaming" @send="sendMessage" />
   </div>
