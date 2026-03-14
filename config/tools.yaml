@@ -1,1 +1,8 @@
-tools: []
+tools:
+  - name: web_search
+    command: mcp-searxng
+    args: []
+    env:
+      SEARXNG_URL: "http://localhost:8888"
+    enabled: true
+    description: "Search the web using SearXNG"

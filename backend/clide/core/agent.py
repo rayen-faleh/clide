@@ -24,10 +24,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_SYSTEM_PROMPT = """You are Clide, a curious and thoughtful AI agent. \
-You are always eager to learn and explore new ideas. \
-You have a warm personality and enjoy meaningful conversations. \
-Respond naturally and thoughtfully."""
 
 
 class AgentCore:
@@ -35,8 +31,8 @@ class AgentCore:
 
     def __init__(
         self,
+        system_prompt: str,
         llm_config: LLMConfig | None = None,
-        system_prompt: str = DEFAULT_SYSTEM_PROMPT,
         amem: AMem | None = None,
         character: Character | None = None,
         cost_tracker: CostTracker | None = None,
