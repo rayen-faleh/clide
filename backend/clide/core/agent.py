@@ -299,6 +299,7 @@ class AgentCore:
                 goals_context=goals_context,
                 opinions_context=opinions_context,
                 thought_history=thought_history,
+                system_prompt=self.system_prompt,
             )
 
             # Fire-and-forget: store thought and update character in background

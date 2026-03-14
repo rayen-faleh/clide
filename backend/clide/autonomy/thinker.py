@@ -64,6 +64,7 @@ class Thinker:
         goals_context: str = "",
         opinions_context: str = "",
         thought_history: str = "",
+        system_prompt: str = "",
     ) -> tuple[Thought, str, float]:
         """Generate an autonomous thought.
 
@@ -89,7 +90,10 @@ class Thinker:
             ),
         )
 
-        messages = [{"role": "user", "content": prompt}]
+        messages: list[dict[str, str]] = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": prompt})
         response_text = ""
         async for chunk in stream_completion(messages, self.llm_config):
             response_text += chunk
