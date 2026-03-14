@@ -2,13 +2,22 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 import yaml
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
+from clide.api.websocket import get_agent_core
+from clide.character.traits import PersonalityTraits
 from clide.config.settings import _PROJECT_ROOT, Settings
+from clide.core.agent import AgentCore
+
+logger = logging.getLogger(__name__)
+
+# Settings that require a restart to take effect
+_RESTART_REQUIRED_KEYS = {"llm", "states"}
 
 config_router = APIRouter(prefix="/api/config", tags=["config"])
 
@@ -55,6 +64,39 @@ async def update_config(update: ConfigUpdate) -> dict[str, Any]:
     CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
     with open(CONFIG_PATH, "w") as f:
         yaml.dump(current_data, f, default_flow_style=False, sort_keys=False)
+
+    # Apply changes to live agent core
+    needs_restart = False
+    if update.agent:
+        needs_restart = bool(_RESTART_REQUIRED_KEYS & update.agent.keys())
+
+    try:
+        agent_core = get_agent_core()
+        if isinstance(agent_core, AgentCore):
+            # Update system prompt
+            if new_settings.agent.system_prompt:
+                agent_core.system_prompt = new_settings.agent.system_prompt
+
+            # Update character traits
+            if agent_core.character is not None:
+                new_traits = new_settings.agent.character.base_traits
+                agent_core.character.traits = PersonalityTraits(
+                    curiosity=new_traits.curiosity,
+                    warmth=new_traits.warmth,
+                    humor=new_traits.humor,
+                    assertiveness=new_traits.assertiveness,
+                    creativity=new_traits.creativity,
+                )
+                await agent_core.character.save()
+
+            if needs_restart:
+                logger.info(
+                    "Config saved — some changes (llm, states) require restart to take effect"
+                )
+            else:
+                logger.info("Applied config changes to live agent")
+    except Exception:
+        logger.warning("Failed to apply config to live agent", exc_info=True)
 
     return new_settings.model_dump()
 

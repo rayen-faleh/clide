@@ -4,12 +4,16 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
+from unittest.mock import AsyncMock, patch
 
 import pytest
 import yaml
 from httpx import ASGITransport, AsyncClient
 
 from clide.api.config_routes import ConfigUpdate, _deep_merge, config_router
+from clide.character.character import Character
+from clide.character.traits import PersonalityTraits
+from clide.core.agent import AgentCore
 from clide.main import create_app
 
 
@@ -184,3 +188,48 @@ class TestConfigUpdateModel:
     def test_config_update_accepts_dict(self) -> None:
         update = ConfigUpdate(agent={"name": "NewName"})
         assert update.agent == {"name": "NewName"}
+
+
+class TestLiveAgentUpdate:
+    """Tests that PATCH /api/config applies changes to the live agent core."""
+
+    async def test_update_system_prompt_applies_to_live_agent(self, client: AsyncClient) -> None:
+        agent_core = AgentCore(system_prompt="old prompt")
+        with patch("clide.api.config_routes.get_agent_core", return_value=agent_core):
+            response = await client.patch(
+                "/api/config",
+                json={"agent": {"system_prompt": "new live prompt"}},
+            )
+        assert response.status_code == 200
+        assert agent_core.system_prompt == "new live prompt"
+
+    async def test_update_traits_applies_to_live_agent(
+        self, client: AsyncClient, tmp_path: Path
+    ) -> None:
+        character = Character(
+            traits=PersonalityTraits(curiosity=0.5, warmth=0.5),
+            db_path=tmp_path / "char.db",
+        )
+        character.save = AsyncMock()  # type: ignore[method-assign]
+        agent_core = AgentCore(character=character)
+        with patch("clide.api.config_routes.get_agent_core", return_value=agent_core):
+            response = await client.patch(
+                "/api/config",
+                json={"agent": {"character": {"base_traits": {"curiosity": 0.95, "warmth": 0.3}}}},
+            )
+        assert response.status_code == 200
+        assert agent_core.character.traits.curiosity == 0.95
+        assert agent_core.character.traits.warmth == 0.3
+        character.save.assert_awaited_once()
+
+    async def test_live_update_failure_does_not_crash_endpoint(self, client: AsyncClient) -> None:
+        with patch(
+            "clide.api.config_routes.get_agent_core",
+            side_effect=RuntimeError("no agent"),
+        ):
+            response = await client.patch(
+                "/api/config",
+                json={"agent": {"system_prompt": "test"}},
+            )
+        # Should still return 200 — YAML was saved successfully
+        assert response.status_code == 200
