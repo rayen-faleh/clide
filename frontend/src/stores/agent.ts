@@ -1,6 +1,12 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
-import type { AgentState, MoodPayload, WSMessage } from '@/types/messages'
+import type {
+  AgentState,
+  MoodPayload,
+  ToolCallPayload,
+  ToolResultPayload,
+  WSMessage,
+} from '@/types/messages'
 
 export interface ChatEntry {
   id: string
@@ -9,6 +15,20 @@ export interface ChatEntry {
   timestamp: Date
   streaming?: boolean
 }
+
+export interface ToolEvent {
+  id: string
+  type: 'tool'
+  tool_name: string
+  arguments: Record<string, unknown>
+  call_id: string
+  result?: unknown
+  error?: string | null
+  status: 'executing' | 'success' | 'error'
+  timestamp: Date
+}
+
+export type MessageItem = ChatEntry | ToolEvent
 
 export interface ThoughtEntry {
   content: string
@@ -24,7 +44,7 @@ export const useAgentStore = defineStore('agent', () => {
   const connected = ref(false)
 
   // Chat state — persists across navigation
-  const messages = ref<ChatEntry[]>([])
+  const messages = ref<MessageItem[]>([])
   const isStreaming = ref(false)
 
   function handleStateChange(msg: WSMessage) {
@@ -55,7 +75,9 @@ export const useAgentStore = defineStore('agent', () => {
   }
 
   function updateLastAssistant(content: string, done: boolean) {
-    const lastAssistant = [...messages.value].reverse().find((m) => m.role === 'assistant')
+    const lastAssistant = [...messages.value]
+      .reverse()
+      .find((m): m is ChatEntry => !('type' in m && m.type === 'tool') && m.role === 'assistant')
     if (lastAssistant) {
       if (done) {
         lastAssistant.streaming = false
@@ -65,6 +87,34 @@ export const useAgentStore = defineStore('agent', () => {
     }
     if (done) {
       isStreaming.value = false
+    }
+  }
+
+  function handleToolCall(msg: WSMessage) {
+    const payload = msg.payload as unknown as ToolCallPayload
+    const event: ToolEvent = {
+      id: crypto.randomUUID(),
+      type: 'tool',
+      tool_name: payload.tool_name,
+      arguments: payload.arguments,
+      call_id: payload.call_id,
+      status: 'executing',
+      timestamp: new Date(),
+    }
+    messages.value.push(event)
+  }
+
+  function handleToolResult(msg: WSMessage) {
+    const payload = msg.payload as unknown as ToolResultPayload
+    const event = [...messages.value]
+      .reverse()
+      .find(
+        (m): m is ToolEvent => 'type' in m && m.type === 'tool' && m.call_id === payload.call_id,
+      )
+    if (event) {
+      event.result = payload.result
+      event.error = payload.error
+      event.status = payload.error ? 'error' : 'success'
     }
   }
 
@@ -87,6 +137,8 @@ export const useAgentStore = defineStore('agent', () => {
     setConnected,
     addMessage,
     updateLastAssistant,
+    handleToolCall,
+    handleToolResult,
     clearMessages,
   }
 })
