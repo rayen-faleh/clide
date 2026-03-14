@@ -89,3 +89,31 @@ class TestGoalManager:
 
     async def test_delete_nonexistent(self, goal_manager: GoalManager) -> None:
         assert await goal_manager.delete("fake-id") is False
+
+    async def test_count_active(self, goal_manager: GoalManager) -> None:
+        await goal_manager.create("Goal A")
+        await goal_manager.create("Goal B")
+        await goal_manager.create("Goal C")
+        count = await goal_manager.count_active()
+        assert count == 3
+
+    async def test_count_active_excludes_completed(self, goal_manager: GoalManager) -> None:
+        await goal_manager.create("Active goal")
+        g2 = await goal_manager.create("Done goal")
+        await goal_manager.update(g2.id, status=GoalStatus.COMPLETED)
+        g3 = await goal_manager.create("Abandoned goal")
+        await goal_manager.update(g3.id, status=GoalStatus.ABANDONED)
+        count = await goal_manager.count_active()
+        assert count == 1
+
+    async def test_find_by_description(self, goal_manager: GoalManager) -> None:
+        await goal_manager.create("Learn about astronomy")
+        await goal_manager.create("Practice guitar daily")
+        found = await goal_manager.find_by_description("astronomy")
+        assert found is not None
+        assert found.description == "Learn about astronomy"
+
+    async def test_find_by_description_not_found(self, goal_manager: GoalManager) -> None:
+        await goal_manager.create("Learn about astronomy")
+        found = await goal_manager.find_by_description("nonexistent topic")
+        assert found is None

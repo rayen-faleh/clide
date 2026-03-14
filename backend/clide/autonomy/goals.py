@@ -159,6 +159,31 @@ class GoalManager:
             deleted: bool = cursor.rowcount > 0
             return deleted
 
+    async def count_active(self) -> int:
+        """Count the number of active goals."""
+        await self._ensure_initialized()
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute(
+                "SELECT COUNT(*) FROM goals WHERE status = ?",
+                (GoalStatus.ACTIVE.value,),
+            )
+            row = await cursor.fetchone()
+            return row[0] if row else 0
+
+    async def find_by_description(self, description: str) -> Goal | None:
+        """Find a goal by partial description match."""
+        await self._ensure_initialized()
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                "SELECT * FROM goals WHERE description LIKE ? AND status = ? LIMIT 1",
+                (f"%{description}%", GoalStatus.ACTIVE.value),
+            )
+            row = await cursor.fetchone()
+        if row is None:
+            return None
+        return self._row_to_goal(row)
+
     @staticmethod
     def _row_to_goal(row: aiosqlite.Row) -> Goal:
         return Goal(

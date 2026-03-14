@@ -221,3 +221,80 @@ class TestThinker:
     async def test_anti_repetition_instruction_in_prompt(self) -> None:
         assert "Do NOT repeat" in THINKING_PROMPT
         assert "PREVIOUS thoughts" in THINKING_PROMPT
+
+    async def test_think_with_max_goals_in_prompt(self, thinker: Thinker) -> None:
+        mock_response = '{"thought": "Goals.", "mood": "focused", "mood_intensity": 0.7}'
+        captured_messages: list[object] = []
+
+        async def fake_stream(
+            messages: object, *args: object, **kwargs: object
+        ) -> AsyncIterator[str]:
+            captured_messages.append(messages)
+            yield mock_response
+
+        with patch("clide.autonomy.thinker.stream_completion", side_effect=fake_stream):
+            await thinker.think(max_goals=3)
+
+        prompt = captured_messages[0][0]["content"]  # type: ignore[index]
+        assert "3" in prompt
+        assert "active goals" in prompt
+
+    async def test_think_extracts_new_goal(self, thinker: Thinker) -> None:
+        mock_response = (
+            '{"thought": "I want to learn.", "mood": "curious", '
+            '"mood_intensity": 0.8, "topic": "learning", "follow_up": "", '
+            '"new_goal": "Study quantum physics"}'
+        )
+
+        async def fake_stream(*args: object, **kwargs: object) -> AsyncIterator[str]:
+            yield mock_response
+
+        with patch("clide.autonomy.thinker.stream_completion", side_effect=fake_stream):
+            thought, _, _ = await thinker.think()
+
+        assert thought.metadata["new_goal"] == "Study quantum physics"
+
+    async def test_think_extracts_goal_updates(self, thinker: Thinker) -> None:
+        import json
+
+        mock_response = json.dumps(
+            {
+                "thought": "Making progress.",
+                "mood": "focused",
+                "mood_intensity": 0.7,
+                "topic": "progress",
+                "follow_up": "",
+                "new_goal": "",
+                "goal_updates": [
+                    {
+                        "description": "astronomy",
+                        "progress": 0.5,
+                        "status": "active",
+                        "reason": "read a chapter",
+                    }
+                ],
+            }
+        )
+
+        async def fake_stream(*args: object, **kwargs: object) -> AsyncIterator[str]:
+            yield mock_response
+
+        with patch("clide.autonomy.thinker.stream_completion", side_effect=fake_stream):
+            thought, _, _ = await thinker.think()
+
+        updates = json.loads(thought.metadata["goal_updates"])
+        assert len(updates) == 1
+        assert updates[0]["description"] == "astronomy"
+        assert updates[0]["progress"] == 0.5
+
+    async def test_think_no_goals_in_response(self, thinker: Thinker) -> None:
+        mock_response = '{"thought": "Just thinking.", "mood": "neutral", "mood_intensity": 0.4}'
+
+        async def fake_stream(*args: object, **kwargs: object) -> AsyncIterator[str]:
+            yield mock_response
+
+        with patch("clide.autonomy.thinker.stream_completion", side_effect=fake_stream):
+            thought, _, _ = await thinker.think()
+
+        assert thought.metadata["new_goal"] == ""
+        assert thought.metadata["goal_updates"] == "[]"
