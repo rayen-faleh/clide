@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import logging
 from collections.abc import AsyncIterator
@@ -107,7 +108,15 @@ class AgentCore:
         if len(self.conversation_history) > self._max_history_length:
             self.conversation_history = self.conversation_history[-self._max_history_length :]
 
-        # Store to long-term memory (fire and forget)
+        # Transition back to IDLE immediately (don't block on memory/character)
+        if self.state_machine.state == AgentState.CONVERSING:
+            self.state_machine.transition(AgentState.IDLE, "response complete")
+
+        # Fire-and-forget: store memory and update character in background
+        asyncio.create_task(self._post_response_tasks(content, full_response))
+
+    async def _post_response_tasks(self, content: str, full_response: str) -> None:
+        """Background tasks after response: store memory and update character."""
         if self.amem:
             try:
                 await self.amem.remember(
@@ -117,7 +126,6 @@ class AgentCore:
             except Exception:
                 logger.warning("Failed to store memory", exc_info=True)
 
-        # Update mood
         if self.character:
             try:
                 self.character.mood.transition("content", 0.6, "conversation")
@@ -125,9 +133,29 @@ class AgentCore:
             except Exception:
                 logger.warning("Failed to update character", exc_info=True)
 
-        # Transition back to IDLE after response
-        if self.state_machine.state == AgentState.CONVERSING:
-            self.state_machine.transition(AgentState.IDLE, "response complete")
+    async def _post_thought_tasks(self, thought: object, mood: str, intensity: float) -> None:
+        """Background tasks after thinking: store thought and update character."""
+        if self.amem:
+            try:
+                meta = getattr(thought, "metadata", {}) or {}
+                await self.amem.remember(
+                    f"Autonomous thought: {getattr(thought, 'content', str(thought))}",
+                    metadata={
+                        "type": "thought",
+                        "source": "autonomous",
+                        "topic": meta.get("topic", ""),
+                        "follow_up": meta.get("follow_up", ""),
+                    },
+                )
+            except Exception:
+                logger.warning("Failed to store thought memory", exc_info=True)
+
+        if self.character:
+            try:
+                self.character.mood.transition(mood, intensity, "autonomous thinking")
+                await self.character.save()
+            except Exception:
+                logger.warning("Failed to update character after thinking", exc_info=True)
 
     async def autonomous_think(self) -> tuple[str, str, float] | None:
         """Run an autonomous thinking cycle.
@@ -227,24 +255,8 @@ class AgentCore:
                 thought_history=thought_history,
             )
 
-            # Store thought as memory with rich metadata
-            if self.amem:
-                with contextlib.suppress(Exception):
-                    await self.amem.remember(
-                        f"Autonomous thought: {thought.content}",
-                        metadata={
-                            "type": "thought",
-                            "source": "autonomous",
-                            "topic": thought.metadata.get("topic", ""),
-                            "follow_up": thought.metadata.get("follow_up", ""),
-                        },
-                    )
-
-            # Update mood
-            if self.character:
-                with contextlib.suppress(Exception):
-                    self.character.mood.transition(mood, intensity, "autonomous thinking")
-                    await self.character.save()
+            # Fire-and-forget: store thought and update character in background
+            asyncio.create_task(self._post_thought_tasks(thought, mood, intensity))
 
             return thought.content, mood, intensity
 

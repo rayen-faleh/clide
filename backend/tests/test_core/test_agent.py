@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -158,6 +159,7 @@ class TestProcessMessageWithMemory:
             async for _ in agent.process_message("hello"):
                 pass
 
+        await asyncio.sleep(0)  # Let background task run
         amem.remember.assert_awaited_once()
         call_args = amem.remember.call_args
         assert "User said: hello" in call_args[0][0]
@@ -259,6 +261,7 @@ class TestProcessMessageWithCharacter:
             async for _ in agent.process_message("hi"):
                 pass
 
+        await asyncio.sleep(0)  # Let background task run
         character.mood.transition.assert_called_once_with("content", 0.6, "conversation")
         character.save.assert_awaited_once()
 
@@ -386,6 +389,7 @@ class TestAutonomousThink:
 
             await agent.autonomous_think()
 
+        await asyncio.sleep(0)  # Let background task run
         amem.remember.assert_awaited_once()
         call_args = amem.remember.call_args
         assert "Deep reflection" in call_args[0][0]
@@ -417,6 +421,7 @@ class TestAutonomousThink:
 
             await agent.autonomous_think()
 
+        await asyncio.sleep(0)  # Let background task run
         character.mood.transition.assert_called_once_with("curious", 0.8, "autonomous thinking")
         character.save.assert_awaited_once()
 
