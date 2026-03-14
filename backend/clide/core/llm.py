@@ -106,3 +106,39 @@ async def stream_completion(
             logger.warning("LLM stream produced 0 content chunks")
         else:
             logger.debug("LLM stream complete: %d chunks yielded", chunk_count)
+
+
+async def complete_with_tools(
+    messages: list[dict[str, Any]],
+    config: LLMConfig,
+    tools: list[dict[str, Any]],
+    **kwargs: Any,
+) -> Any:
+    """Non-streaming completion for tool call detection.
+
+    Uses non-streaming because tool call arguments arrive fragmented
+    in streaming mode, making them unreliable to parse.
+    """
+    model = _build_model_name(config)
+    logger.debug("Non-streaming completion with tools, model: %s", model)
+
+    call_kwargs: dict[str, Any] = {
+        "model": model,
+        "messages": messages,
+        "max_tokens": config.max_tokens,
+        "tools": tools,
+        "stream": False,
+        **kwargs,
+    }
+    if config.api_base:
+        call_kwargs["api_base"] = config.api_base
+
+    async with _llm_semaphore:
+        try:
+            async with asyncio.timeout(config.timeout_seconds):
+                response = await litellm.acompletion(**call_kwargs)
+        except TimeoutError:
+            logger.error("Tool completion timed out after %ss", config.timeout_seconds)
+            raise
+
+    return response

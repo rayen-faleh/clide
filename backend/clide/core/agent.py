@@ -8,10 +8,10 @@ import json as json_mod
 import logging
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from clide.api.schemas import AgentState
-from clide.core.llm import LLMConfig, stream_completion
+from clide.core.llm import LLMConfig, complete_with_tools, stream_completion
 from clide.core.prompts import build_system_prompt
 from clide.core.state import StateMachine
 
@@ -21,9 +21,9 @@ if TYPE_CHECKING:
     from clide.core.conversation_store import ConversationStore
     from clide.core.cost import CostTracker
     from clide.memory.amem import AMem
+    from clide.tools.registry import ToolRegistry
 
 logger = logging.getLogger(__name__)
-
 
 
 class AgentCore:
@@ -31,7 +31,7 @@ class AgentCore:
 
     def __init__(
         self,
-        system_prompt: str,
+        system_prompt: str = "",
         llm_config: LLMConfig | None = None,
         amem: AMem | None = None,
         character: Character | None = None,
@@ -39,11 +39,12 @@ class AgentCore:
         goal_manager: GoalManager | None = None,
         conversation_store: ConversationStore | None = None,
         born_at: datetime | None = None,
+        tool_registry: ToolRegistry | None = None,
     ) -> None:
         self.state_machine = StateMachine(initial_state=AgentState.IDLE)
         self.llm_config = llm_config or LLMConfig()
         self.system_prompt = system_prompt
-        self.conversation_history: list[dict[str, str]] = []
+        self.conversation_history: list[dict[str, Any]] = []
         self._max_history_length = 50  # Keep last N messages
         self.amem = amem
         self.character = character
@@ -52,6 +53,8 @@ class AgentCore:
         self.conversation_store = conversation_store
         self._history_loaded = False
         self.born_at = born_at
+        self.tool_registry = tool_registry
+        self._tool_event_callback: Any = None  # Set by websocket handler
 
     @staticmethod
     def _format_age(dt: datetime) -> str:
@@ -72,6 +75,108 @@ class AgentCore:
     def get_state(self) -> AgentState:
         """Get current agent state."""
         return self.state_machine.state
+
+    def set_tool_event_callback(self, callback: Any) -> None:
+        """Set callback for tool events (called by WebSocket handler)."""
+        self._tool_event_callback = callback
+
+    async def _process_with_tools(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+    ) -> str:
+        """Execute the agentic tool loop.
+
+        Calls LLM with tools. If LLM requests tool calls, executes them
+        via MCP registry, feeds results back, and loops until LLM produces
+        a text response.
+
+        Returns the final text response.
+        """
+        max_iterations = 10
+
+        for iteration in range(max_iterations):
+            logger.info("Tool loop iteration %d", iteration + 1)
+            response = await complete_with_tools(messages, self.llm_config, tools)
+            choice = response.choices[0]
+
+            # Check if LLM wants to call tools
+            if choice.finish_reason == "tool_calls" and choice.message.tool_calls:
+                logger.info("LLM requested %d tool call(s)", len(choice.message.tool_calls))
+
+                # Transition to WORKING
+                if self.state_machine.can_transition(AgentState.WORKING):
+                    self.state_machine.transition(AgentState.WORKING, "tool call")
+
+                # Append assistant message with tool calls
+                messages.append(choice.message.model_dump())
+
+                # Execute each tool call
+                for tool_call in choice.message.tool_calls:
+                    func = tool_call.function
+                    tool_name = func.name
+                    try:
+                        arguments = (
+                            json_mod.loads(func.arguments)
+                            if isinstance(func.arguments, str)
+                            else func.arguments
+                        )
+                    except (json_mod.JSONDecodeError, TypeError):
+                        arguments = {}
+                    call_id = tool_call.id
+
+                    logger.info("Executing tool: %s(%s)", tool_name, arguments)
+
+                    # Execute via registry
+                    assert self.tool_registry is not None
+                    result = await self.tool_registry.execute_tool(tool_name, arguments)
+
+                    logger.info("Tool result: success=%s", result.success)
+
+                    # Notify callback (WebSocket handler broadcasts this)
+                    if self._tool_event_callback:
+                        try:
+                            await self._tool_event_callback(
+                                {
+                                    "tool_name": tool_name,
+                                    "arguments": arguments,
+                                    "call_id": call_id,
+                                    "result": result.result if result.success else None,
+                                    "error": result.error if not result.success else None,
+                                    "success": result.success,
+                                }
+                            )
+                        except Exception:
+                            logger.warning("Tool event callback failed", exc_info=True)
+
+                    # Append tool result message for LLM
+                    result_content = (
+                        json_mod.dumps(result.result)
+                        if result.success
+                        else f"Error: {result.error}"
+                    )
+                    messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": call_id,
+                            "content": result_content,
+                        }
+                    )
+
+                # Transition back to CONVERSING
+                if self.state_machine.state == AgentState.WORKING:
+                    self.state_machine.transition(AgentState.CONVERSING, "tool results ready")
+
+                # Loop: call LLM again with tool results
+                continue
+
+            else:
+                # LLM generated text response (no more tool calls)
+                return choice.message.content or ""
+
+        # Safety: too many iterations
+        logger.warning("Tool loop hit max iterations (%d)", max_iterations)
+        return "I got caught in a tool loop. Let me try a different approach."
 
     async def process_message(self, content: str) -> AsyncIterator[str]:
         """Process a user message and yield response chunks.
@@ -137,17 +242,28 @@ class AgentCore:
         )
 
         # Build messages for LLM
-        messages = [
+        messages: list[dict[str, Any]] = [
             {"role": "system", "content": system},
             *self.conversation_history,
         ]
 
-        # Stream response
-        logger.info("Streaming LLM response...")
+        # --- Response generation (tools or streaming) ---
+        tool_definitions: list[dict[str, Any]] = []
+        if self.tool_registry:
+            tool_definitions = self.tool_registry.get_tool_definitions_for_llm()
+
         full_response = ""
-        async for chunk in stream_completion(messages, self.llm_config):
-            full_response += chunk
-            yield chunk
+        if tool_definitions:
+            # TOOL-AWARE PATH: non-streaming with tool loop
+            logger.info("Using tool-aware path (%d tools available)", len(tool_definitions))
+            full_response = await self._process_with_tools(messages, tool_definitions)
+            yield full_response
+        else:
+            # SIMPLE PATH: streaming without tools (existing behavior)
+            logger.info("Streaming LLM response...")
+            async for chunk in stream_completion(messages, self.llm_config):
+                full_response += chunk
+                yield chunk
 
         logger.info("LLM response complete (%d chars)", len(full_response))
 
