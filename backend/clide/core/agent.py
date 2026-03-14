@@ -370,15 +370,19 @@ class AgentCore:
 
             # --- Gather goals context ---
             goals_context = ""
+            current_goal_count = 0
             if self.goal_manager:
                 with contextlib.suppress(Exception):
                     active_goals = await self.goal_manager.get_active()
+                    current_goal_count = len(active_goals)
                     if active_goals:
                         goals_context = "\n".join(
                             f"- {g.description} (progress: {g.progress:.0%},"
                             f" created {self._format_age(g.created_at)})"
                             for g in active_goals
                         )
+                    else:
+                        goals_context = "(none yet - you can create your first goal!)"
 
             # --- Gather opinions context ---
             opinions_context = ""
@@ -424,6 +428,7 @@ class AgentCore:
                     thought_history = "\n".join(thought_parts)
 
             # --- Think ---
+            max_goals = 5
             thought, mood, intensity = await thinker.think(
                 memory_context=memory_context,
                 mood_context=mood_context,
@@ -432,6 +437,7 @@ class AgentCore:
                 opinions_context=opinions_context,
                 thought_history=thought_history,
                 system_prompt=self.system_prompt,
+                max_goals=max_goals if current_goal_count < max_goals else 0,
             )
 
             # Handle goal creation/updates from thought metadata
