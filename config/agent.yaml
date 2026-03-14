@@ -9,14 +9,14 @@ agent:
     provider: ollama
     model: qwen3.5:4b
     max_tokens: 4096
-    api_base: http://localhost:11434
+    api_base: ''
   states:
     sleep_schedule:
       enabled: false
       start: 01:00
       end: 07:00
     thinking:
-      interval_seconds: 180
+      interval_seconds: 300
       max_tokens_per_cycle: 2000
       max_consecutive_cycles: 5
     working:
