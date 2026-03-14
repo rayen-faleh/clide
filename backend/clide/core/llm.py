@@ -76,7 +76,33 @@ async def stream_completion(
             raise
 
         # Stream without timeout (tokens arrive at their own pace)
+        # Handle "thinking" models (e.g., qwen3.5) that split output into
+        # reasoning_content (internal thinking) and content (actual response).
+        # We yield content tokens, and if there are none, fall back to
+        # reasoning_content so the response isn't empty.
+        chunk_count = 0
+        reasoning_chunks: list[str] = []
         async for chunk in response:
-            content = chunk.choices[0].delta.content
+            delta = chunk.choices[0].delta
+            content = delta.content
+            reasoning = getattr(delta, "reasoning_content", None)
+
             if content:
+                chunk_count += 1
                 yield content
+            elif reasoning:
+                reasoning_chunks.append(reasoning)
+
+        # If the model only produced reasoning (thinking mode), yield that
+        # as the response so the user isn't left with an empty message.
+        if chunk_count == 0 and reasoning_chunks:
+            logger.info(
+                "LLM produced only reasoning tokens (%d chunks), yielding as response",
+                len(reasoning_chunks),
+            )
+            for rc in reasoning_chunks:
+                yield rc
+        elif chunk_count == 0:
+            logger.warning("LLM stream produced 0 content chunks")
+        else:
+            logger.debug("LLM stream complete: %d chunks yielded", chunk_count)
