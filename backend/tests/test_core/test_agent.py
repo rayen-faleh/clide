@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from clide.api.schemas import AgentState
 from clide.core.agent import AgentCore
+from clide.core.conversation_store import ConversationStore
 
 
 async def fake_stream_completion(
@@ -112,10 +114,11 @@ class TestAgentCore:
         assert agent.conversation_history[0]["content"] == "first"
         assert agent.conversation_history[2]["content"] == "second"
 
-    def test_clear_history(self) -> None:
+    @pytest.mark.asyncio
+    async def test_clear_history(self) -> None:
         agent = AgentCore()
         agent.conversation_history = [{"role": "user", "content": "test"}]
-        agent.clear_history()
+        await agent.clear_history()
         assert agent.conversation_history == []
 
     @pytest.mark.asyncio
@@ -655,3 +658,74 @@ class TestAutonomousThink:
             await agent.autonomous_think()
 
         assert "Recent chat about AI" in str(captured_kwargs.get("memory_context", ""))
+
+
+class TestConversationStorePersistence:
+    """Tests for conversation store integration in AgentCore."""
+
+    @pytest.fixture
+    def store(self, tmp_path: Path) -> ConversationStore:
+        return ConversationStore(db_path=tmp_path / "test.db")
+
+    @pytest.mark.asyncio
+    async def test_persists_user_message(self, store: ConversationStore) -> None:
+        agent = AgentCore(conversation_store=store)
+        with patch("clide.core.agent.stream_completion", side_effect=fake_stream_completion):
+            async for _ in agent.process_message("hello"):
+                pass
+        messages = await store.get_recent()
+        user_msgs = [m for m in messages if m["role"] == "user"]
+        assert len(user_msgs) == 1
+        assert user_msgs[0]["content"] == "hello"
+
+    @pytest.mark.asyncio
+    async def test_persists_assistant_message(self, store: ConversationStore) -> None:
+        agent = AgentCore(conversation_store=store)
+        with patch("clide.core.agent.stream_completion", side_effect=fake_stream_completion):
+            async for _ in agent.process_message("hello"):
+                pass
+        messages = await store.get_recent()
+        assistant_msgs = [m for m in messages if m["role"] == "assistant"]
+        assert len(assistant_msgs) == 1
+        assert assistant_msgs[0]["content"] == "Hello there!"
+
+    @pytest.mark.asyncio
+    async def test_history_loaded_from_store_on_first_message(
+        self, store: ConversationStore
+    ) -> None:
+        # Pre-populate store
+        await store.add_message("user", "old question")
+        await store.add_message("assistant", "old answer")
+
+        agent = AgentCore(conversation_store=store)
+        assert agent.conversation_history == []
+
+        with patch("clide.core.agent.stream_completion", side_effect=fake_stream_completion):
+            async for _ in agent.process_message("new question"):
+                pass
+
+        # History should include old messages + new exchange
+        assert len(agent.conversation_history) == 4
+        assert agent.conversation_history[0]["content"] == "old question"
+        assert agent.conversation_history[1]["content"] == "old answer"
+        assert agent.conversation_history[2]["content"] == "new question"
+
+    @pytest.mark.asyncio
+    async def test_works_without_conversation_store(self) -> None:
+        agent = AgentCore()
+        chunks: list[str] = []
+        with patch("clide.core.agent.stream_completion", side_effect=fake_stream_completion):
+            async for chunk in agent.process_message("hi"):
+                chunks.append(chunk)
+        assert chunks == ["Hello", " there", "!"]
+        assert len(agent.conversation_history) == 2
+
+    @pytest.mark.asyncio
+    async def test_clear_history_clears_store(self, store: ConversationStore) -> None:
+        await store.add_message("user", "hello")
+        agent = AgentCore(conversation_store=store)
+        agent.conversation_history = [{"role": "user", "content": "hello"}]
+        await agent.clear_history()
+        assert agent.conversation_history == []
+        messages = await store.get_recent()
+        assert messages == []

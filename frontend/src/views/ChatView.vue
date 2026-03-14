@@ -43,7 +43,28 @@ function handleThought(msg: WSMessage) {
   agentStore.handleThought(msg)
 }
 
-onMounted(() => {
+onMounted(async () => {
+  // Load persisted history if store is empty
+  if (agentStore.messages.length === 0) {
+    try {
+      const res = await fetch('/api/conversations/recent?limit=50')
+      if (res.ok) {
+        const data = await res.json()
+        for (const msg of data.messages) {
+          agentStore.addMessage({
+            id: msg.id,
+            content: msg.content,
+            role: msg.role,
+            timestamp: new Date(msg.created_at),
+            streaming: false,
+          })
+        }
+      }
+    } catch (e) {
+      console.error('Failed to load chat history:', e)
+    }
+  }
+
   on('chat_response_chunk', handleResponseChunk)
   on('state_change', handleStateChange)
   on('mood_update', handleMoodUpdate)

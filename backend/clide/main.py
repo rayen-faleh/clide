@@ -9,6 +9,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from clide.api.config_routes import config_router
+from clide.api.conversation_routes import conversation_router, set_conversation_store
 from clide.api.memory_routes import cost_router, memory_router, set_amem, set_cost_tracker
 from clide.api.routes import router
 from clide.api.websocket import set_agent_core, ws_router
@@ -18,6 +19,7 @@ from clide.character.character import Character
 from clide.character.traits import PersonalityTraits
 from clide.config.settings import Settings
 from clide.core.agent import AgentCore
+from clide.core.conversation_store import ConversationStore
 from clide.core.cost import CostTracker
 from clide.core.llm import LLMConfig
 from clide.core.prompts import DEFAULT_SYSTEM_PROMPT
@@ -55,6 +57,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     )
     await character.load()  # Load persisted state if exists
 
+    # Conversation store
+    conversation_store = ConversationStore()
+    set_conversation_store(conversation_store)
+
     # Agent core — pass all deps
     agent_core = AgentCore(
         llm_config=llm_config,
@@ -62,6 +68,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
         amem=amem,
         character=character,
         cost_tracker=cost_tracker,
+        conversation_store=conversation_store,
     )
     set_agent_core(agent_core)
 
@@ -142,6 +149,7 @@ def create_app() -> FastAPI:
     app.include_router(memory_router)
     app.include_router(cost_router)
     app.include_router(config_router)
+    app.include_router(conversation_router)
 
     return app
 

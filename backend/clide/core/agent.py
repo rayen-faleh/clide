@@ -16,6 +16,7 @@ from clide.core.state import StateMachine
 if TYPE_CHECKING:
     from clide.autonomy.goals import GoalManager
     from clide.character.character import Character
+    from clide.core.conversation_store import ConversationStore
     from clide.core.cost import CostTracker
     from clide.memory.amem import AMem
 
@@ -38,6 +39,7 @@ class AgentCore:
         character: Character | None = None,
         cost_tracker: CostTracker | None = None,
         goal_manager: GoalManager | None = None,
+        conversation_store: ConversationStore | None = None,
     ) -> None:
         self.state_machine = StateMachine(initial_state=AgentState.IDLE)
         self.llm_config = llm_config or LLMConfig()
@@ -48,6 +50,8 @@ class AgentCore:
         self.character = character
         self.cost_tracker = cost_tracker
         self.goal_manager = goal_manager
+        self.conversation_store = conversation_store
+        self._history_loaded = False
 
     def get_state(self) -> AgentState:
         """Get current agent state."""
@@ -59,12 +63,29 @@ class AgentCore:
         Transitions: IDLE -> CONVERSING (if needed), then streams response.
         Uses memory recall, character personality, and cost tracking when available.
         """
+        # Load persisted history on first message
+        if not self._history_loaded and self.conversation_store:
+            try:
+                self.conversation_history = await self.conversation_store.get_for_llm(
+                    limit=self._max_history_length
+                )
+            except Exception:
+                logger.warning("Failed to load conversation history", exc_info=True)
+            self._history_loaded = True
+
         # Transition to CONVERSING if currently IDLE
         if self.state_machine.state == AgentState.IDLE:
             self.state_machine.transition(AgentState.CONVERSING, "user message received")
 
         # Add user message to history
         self.conversation_history.append({"role": "user", "content": content})
+
+        # Persist user message
+        if self.conversation_store:
+            try:
+                await self.conversation_store.add_message("user", content)
+            except Exception:
+                logger.warning("Failed to persist user message", exc_info=True)
 
         # Recall relevant memories
         memory_context = ""
@@ -103,6 +124,13 @@ class AgentCore:
 
         # Add assistant response to history
         self.conversation_history.append({"role": "assistant", "content": full_response})
+
+        # Persist assistant message
+        if self.conversation_store:
+            try:
+                await self.conversation_store.add_message("assistant", full_response)
+            except Exception:
+                logger.warning("Failed to persist assistant message", exc_info=True)
 
         # Trim history if needed
         if len(self.conversation_history) > self._max_history_length:
@@ -268,6 +296,11 @@ class AgentCore:
             if self.state_machine.state == AgentState.THINKING:
                 self.state_machine.transition(AgentState.IDLE, "thinking cycle complete")
 
-    def clear_history(self) -> None:
+    async def clear_history(self) -> None:
         """Clear conversation history."""
         self.conversation_history = []
+        if self.conversation_store:
+            try:
+                await self.conversation_store.clear()
+            except Exception:
+                logger.warning("Failed to clear conversation store", exc_info=True)
