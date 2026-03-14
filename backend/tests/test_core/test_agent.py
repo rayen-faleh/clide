@@ -13,6 +13,7 @@ import pytest
 from clide.api.schemas import AgentState
 from clide.core.agent import AgentCore
 from clide.core.conversation_store import ConversationStore
+from clide.tools.models import ToolResult
 
 
 async def fake_stream_completion(
@@ -884,3 +885,217 @@ class TestProcessThoughtGoals:
             "goal-456",
             progress=0.25,  # 0.2 + 0.05
         )
+
+
+def _make_tool_response(
+    tool_calls: list[tuple[str, str, str]] | None = None,
+    content: str | None = None,
+) -> MagicMock:
+    """Create a mock LLM response.
+
+    Args:
+        tool_calls: list of (name, arguments_json, call_id) tuples, or None for text.
+        content: text content for non-tool responses.
+    """
+    mock = MagicMock()
+    choice = MagicMock()
+    mock.choices = [choice]
+
+    if tool_calls:
+        choice.finish_reason = "tool_calls"
+        tc_mocks = []
+        for name, args, call_id in tool_calls:
+            tc = MagicMock()
+            tc.function.name = name
+            tc.function.arguments = args
+            tc.id = call_id
+            tc_mocks.append(tc)
+        choice.message.tool_calls = tc_mocks
+        choice.message.model_dump.return_value = {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {"id": cid, "function": {"name": n, "arguments": a}, "type": "function"}
+                for n, a, cid in tool_calls
+            ],
+        }
+    else:
+        choice.finish_reason = "stop"
+        choice.message.tool_calls = None
+        choice.message.content = content or ""
+
+    return mock
+
+
+def _make_mock_registry(
+    tools: list[dict[str, object]] | None = None,
+    execute_return: ToolResult | None = None,
+) -> MagicMock:
+    """Create a mock ToolRegistry."""
+    registry = MagicMock()
+    registry.get_tool_definitions_for_llm.return_value = tools or [
+        {
+            "type": "function",
+            "function": {"name": "web_search", "description": "Search", "parameters": {}},
+        }
+    ]
+    registry.execute_tool = AsyncMock(
+        return_value=execute_return
+        or ToolResult(call_id="call_123", result={"data": "results"}, success=True)
+    )
+    return registry
+
+
+class TestToolRegistry:
+    """Tests for tool registry integration in AgentCore."""
+
+    def test_tool_registry_stored(self) -> None:
+        registry = MagicMock()
+        agent = AgentCore(tool_registry=registry)
+        assert agent.tool_registry is registry
+
+    def test_tool_registry_defaults_to_none(self) -> None:
+        agent = AgentCore()
+        assert agent.tool_registry is None
+
+    def test_set_tool_event_callback(self) -> None:
+        agent = AgentCore()
+        cb = MagicMock()
+        agent.set_tool_event_callback(cb)
+        assert agent._tool_event_callback is cb  # noqa: SLF001
+
+
+class TestProcessMessageWithTools:
+    """Tests for process_message with tool registry."""
+
+    @pytest.mark.asyncio
+    async def test_uses_tools_when_available(self) -> None:
+        registry = _make_mock_registry()
+        agent = AgentCore(tool_registry=registry)
+
+        text_response = _make_tool_response(content="Here are the results.")
+        with patch("clide.core.agent.complete_with_tools", new_callable=AsyncMock) as mock_cwt:
+            mock_cwt.return_value = text_response
+            chunks: list[str] = []
+            async for chunk in agent.process_message("search for cats"):
+                chunks.append(chunk)
+
+        assert chunks == ["Here are the results."]
+        mock_cwt.assert_awaited()
+
+    @pytest.mark.asyncio
+    async def test_streams_without_tools(self) -> None:
+        agent = AgentCore()  # No tool_registry
+        with patch("clide.core.agent.stream_completion", side_effect=fake_stream_completion):
+            chunks: list[str] = []
+            async for chunk in agent.process_message("hi"):
+                chunks.append(chunk)
+        assert chunks == ["Hello", " there", "!"]
+
+
+class TestProcessWithTools:
+    """Tests for _process_with_tools method."""
+
+    @pytest.mark.asyncio
+    async def test_executes_tool_and_returns_text(self) -> None:
+        registry = _make_mock_registry()
+        agent = AgentCore(tool_registry=registry)
+        # Force CONVERSING state so WORKING transition is valid
+        agent.state_machine.transition(AgentState.CONVERSING, "test")
+
+        tool_response = _make_tool_response(
+            tool_calls=[("web_search", '{"query": "test"}', "call_123")]
+        )
+        text_response = _make_tool_response(content="Here are the results.")
+
+        with patch("clide.core.agent.complete_with_tools", new_callable=AsyncMock) as mock_cwt:
+            mock_cwt.side_effect = [tool_response, text_response]
+            result = await agent._process_with_tools(  # noqa: SLF001
+                [{"role": "user", "content": "search"}],
+                registry.get_tool_definitions_for_llm(),
+            )
+
+        assert result == "Here are the results."
+        registry.execute_tool.assert_awaited_once_with("web_search", {"query": "test"})
+
+    @pytest.mark.asyncio
+    async def test_max_iterations_safety(self) -> None:
+        registry = _make_mock_registry()
+        agent = AgentCore(tool_registry=registry)
+        agent.state_machine.transition(AgentState.CONVERSING, "test")
+
+        # Always return tool calls — should stop at 10
+        tool_response = _make_tool_response(tool_calls=[("web_search", '{"q": "x"}', "call_1")])
+
+        with patch("clide.core.agent.complete_with_tools", new_callable=AsyncMock) as mock_cwt:
+            mock_cwt.return_value = tool_response
+            result = await agent._process_with_tools(  # noqa: SLF001
+                [{"role": "user", "content": "search"}],
+                registry.get_tool_definitions_for_llm(),
+            )
+
+        assert "tool loop" in result.lower()
+        assert mock_cwt.await_count == 10
+
+    @pytest.mark.asyncio
+    async def test_tool_event_callback_called(self) -> None:
+        registry = _make_mock_registry()
+        agent = AgentCore(tool_registry=registry)
+        agent.state_machine.transition(AgentState.CONVERSING, "test")
+
+        callback = AsyncMock()
+        agent.set_tool_event_callback(callback)
+
+        tool_response = _make_tool_response(
+            tool_calls=[("web_search", '{"query": "test"}', "call_123")]
+        )
+        text_response = _make_tool_response(content="Done.")
+
+        with patch("clide.core.agent.complete_with_tools", new_callable=AsyncMock) as mock_cwt:
+            mock_cwt.side_effect = [tool_response, text_response]
+            await agent._process_with_tools(  # noqa: SLF001
+                [{"role": "user", "content": "search"}],
+                registry.get_tool_definitions_for_llm(),
+            )
+
+        callback.assert_awaited_once()
+        event = callback.call_args[0][0]
+        assert event["tool_name"] == "web_search"
+        assert event["call_id"] == "call_123"
+        assert event["success"] is True
+
+    @pytest.mark.asyncio
+    async def test_callback_failure_does_not_break_loop(self) -> None:
+        registry = _make_mock_registry()
+        agent = AgentCore(tool_registry=registry)
+        agent.state_machine.transition(AgentState.CONVERSING, "test")
+
+        callback = AsyncMock(side_effect=RuntimeError("callback broke"))
+        agent.set_tool_event_callback(callback)
+
+        tool_response = _make_tool_response(
+            tool_calls=[("web_search", '{"query": "test"}', "call_123")]
+        )
+        text_response = _make_tool_response(content="Done.")
+
+        with patch("clide.core.agent.complete_with_tools", new_callable=AsyncMock) as mock_cwt:
+            mock_cwt.side_effect = [tool_response, text_response]
+            result = await agent._process_with_tools(  # noqa: SLF001
+                [{"role": "user", "content": "search"}],
+                registry.get_tool_definitions_for_llm(),
+            )
+
+        assert result == "Done."
+
+    @pytest.mark.asyncio
+    async def test_no_tools_returns_empty_definitions(self) -> None:
+        registry = MagicMock()
+        registry.get_tool_definitions_for_llm.return_value = []
+        agent = AgentCore(tool_registry=registry)
+
+        # With empty tools, should fall through to streaming path
+        with patch("clide.core.agent.stream_completion", side_effect=fake_stream_completion):
+            chunks: list[str] = []
+            async for chunk in agent.process_message("hi"):
+                chunks.append(chunk)
+        assert chunks == ["Hello", " there", "!"]
