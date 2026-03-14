@@ -50,11 +50,8 @@ You have full autonomy to choose what to think about. Consider:
 Choose whatever genuinely interests you right now. Think about it in depth.
 Express your thoughts fully, typically 2-8 sentences.
 
-You can also manage your goals:
-- If you have fewer than {max_goals} active goals, you may propose a new goal if something \
-genuinely interests you or you want to pursue something specific.
-- Review your active goals and update their progress if relevant to your current thinking.
-- You can mark goals as "completed" or "abandoned" with a reason.
+GOALS: You currently have room for {max_goals} goals.
+{goal_instruction}
 
 Respond with a JSON object:
 {{"thought": "your full thought here (2-8 sentences)", \
@@ -62,11 +59,11 @@ Respond with a JSON object:
 "mood": "one of: curious, excited, contemplative, playful, focused, content, \
 melancholy, frustrated, amused, inspired, tired, neutral", \
 "mood_intensity": 0.0-1.0, \
-"follow_up": "optional: a question or direction for your next thinking cycle", \
-"new_goal": "optional: description of a new goal you want to pursue", \
-"goal_updates": "optional: array of {{\\"description\\": \\"partial match\\", \
+"follow_up": "a question or direction for your next thinking cycle", \
+"new_goal": "a goal you want to pursue (leave empty string if none)", \
+"goal_updates": "array of {{\\"description\\": \\"partial match\\", \
 \\"progress\\": 0.0-1.0, \\"status\\": \\"active|completed|abandoned\\", \
-\\"reason\\": \\"why\\"}}"}}
+\\"reason\\": \\"why\\"}} (empty array if no updates)"}}
 
 Return ONLY the JSON."""
 
@@ -93,6 +90,24 @@ class Thinker:
         Returns:
             Tuple of (thought, suggested_mood, suggested_intensity)
         """
+        # Dynamic goal instruction based on whether agent has goals
+        if not goals_context:
+            goal_instruction = (
+                "You have NO goals yet. You SHOULD create your first goal by "
+                "setting the new_goal field in your response. Pick something "
+                "you genuinely want to explore or achieve."
+            )
+        elif max_goals > 0:
+            goal_instruction = (
+                "You may propose a new goal, update progress on existing ones, "
+                "or mark goals as completed/abandoned."
+            )
+        else:
+            goal_instruction = (
+                "You are at the maximum number of goals. Focus on progressing "
+                "or completing existing ones before creating new ones."
+            )
+
         prompt = THINKING_PROMPT.format(
             personality_context=(
                 f"Your personality:\n{personality_context}" if personality_context else ""
@@ -104,7 +119,8 @@ class Thinker:
                 else "No recent memories yet."
             ),
             goals_context=(
-                f"Your active goals:\n{goals_context or '(none yet - create your first goal!)'}"
+                f"Your active goals:\n"
+                f"{goals_context or '(none yet)'}"
             ),
             opinions_context=(
                 f"Your current opinions:\n{opinions_context}" if opinions_context else ""
@@ -113,6 +129,7 @@ class Thinker:
                 f"Your recent thoughts:\n{thought_history}" if thought_history else ""
             ),
             max_goals=max_goals,
+            goal_instruction=goal_instruction,
         )
 
         messages: list[dict[str, str]] = []
