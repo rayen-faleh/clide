@@ -71,10 +71,12 @@ class ConnectionManager:
     async def connect(self, websocket: WebSocket) -> None:
         await websocket.accept()
         self.active_connections.append(websocket)
+        logger.info("WebSocket client connected (%d total)", len(self.active_connections))
 
     def disconnect(self, websocket: WebSocket) -> None:
         if websocket in self.active_connections:
             self.active_connections.remove(websocket)
+        logger.info("Client disconnected (%d remaining)", len(self.active_connections))
 
     async def send_message(self, websocket: WebSocket, message: WSMessage) -> None:
         try:
@@ -134,6 +136,8 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                 )
                 continue
 
+            logger.debug("Received WS message: type=%s", msg.type.value)
+
             if msg.type == WSMessageType.CHAT_MESSAGE:
                 await _handle_chat_message(websocket, msg, core)
             else:
@@ -177,6 +181,7 @@ async def _handle_chat_message(
 
     # Stream response chunks
     try:
+        logger.info("Streaming response to client...")
         async for chunk in core.process_message(payload.content):
             await manager.send_message(
                 websocket,
@@ -190,6 +195,7 @@ async def _handle_chat_message(
             )
 
         # Send final done message
+        logger.info("Response stream complete (done=True sent)")
         await manager.send_message(
             websocket,
             WSMessage(
@@ -202,6 +208,12 @@ async def _handle_chat_message(
         )
 
         # Broadcast state change to all clients
+        new_state = core.get_state()
+        logger.debug(
+            "Broadcasting state change: %s -> %s",
+            AgentState.CONVERSING.value,
+            new_state.value,
+        )
         await manager.broadcast(
             WSMessage(
                 type=WSMessageType.STATE_CHANGE,
@@ -213,7 +225,7 @@ async def _handle_chat_message(
             )
         )
     except Exception as e:
-        logger.exception("Error processing message")
+        logger.exception("Error handling chat message: %s", e)
         await manager.send_message(
             websocket,
             WSMessage(

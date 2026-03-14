@@ -47,6 +47,7 @@ class ConversationStore:
                 (msg_id, role, content, now),
             )
             await db.commit()
+        logger.debug("Persisted message: role=%s, length=%d", role, len(content))
         return msg_id
 
     async def get_recent(self, limit: int = 50) -> list[dict[str, str]]:
@@ -75,6 +76,7 @@ class ConversationStore:
     async def get_for_llm(self, limit: int = 50) -> list[dict[str, str]]:
         """Get recent messages formatted for LLM context (role + content only)."""
         messages = await self.get_recent(limit=limit)
+        logger.debug("Loaded %d messages from conversation history", len(messages))
         return [{"role": m["role"], "content": m["content"]} for m in messages]
 
     async def clear(self) -> None:

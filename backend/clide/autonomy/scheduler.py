@@ -96,8 +96,10 @@ class ThinkingScheduler:
                     else:
                         self._thinking_in_progress = True
                         try:
+                            logger.info("Thinking cycle #%d starting...", self._cycle_count + 1)
                             await self._callback()
                             self._cycle_count += 1
+                            logger.info("Thinking cycle #%d complete", self._cycle_count)
                         finally:
                             self._thinking_in_progress = False
                 await asyncio.sleep(self.interval_seconds)

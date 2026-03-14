@@ -88,6 +88,7 @@ class Character:
                 ("opinions", json.dumps(self.opinions.to_list())),
             )
             await db.commit()
+        logger.info("Character state saved to DB")
 
     async def load(self) -> None:
         """Load character state from SQLite."""
@@ -116,3 +117,4 @@ class Character:
             row = await cursor.fetchone()
             if row:
                 self.opinions = OpinionStore.from_list(json.loads(row["value"]))
+        logger.info("Character state loaded from DB")

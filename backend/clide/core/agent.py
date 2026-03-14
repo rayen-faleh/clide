@@ -69,12 +69,17 @@ class AgentCore:
                 self.conversation_history = await self.conversation_store.get_for_llm(
                     limit=self._max_history_length
                 )
+                logger.info(
+                    "Loaded %d messages from conversation store",
+                    len(self.conversation_history),
+                )
             except Exception:
                 logger.warning("Failed to load conversation history", exc_info=True)
             self._history_loaded = True
 
         # Transition to CONVERSING if currently IDLE
         if self.state_machine.state == AgentState.IDLE:
+            logger.info("Agent state: IDLE -> CONVERSING (user message received)")
             self.state_machine.transition(AgentState.CONVERSING, "user message received")
 
         # Add user message to history
@@ -93,9 +98,12 @@ class AgentCore:
             try:
                 relevant = await self.amem.recall(content, limit=5)
                 if relevant:
+                    logger.info("Recalled %d memories for context", len(relevant))
                     memory_context = "\n".join(
                         f"- {z.summary or z.content[:100]}" for z in relevant
                     )
+                else:
+                    logger.debug("No memories found")
             except Exception:
                 logger.warning("Failed to recall memories", exc_info=True)
 
@@ -117,10 +125,13 @@ class AgentCore:
         ]
 
         # Stream response
+        logger.info("Streaming LLM response...")
         full_response = ""
         async for chunk in stream_completion(messages, self.llm_config):
             full_response += chunk
             yield chunk
+
+        logger.info("LLM response complete (%d chars)", len(full_response))
 
         # Add assistant response to history
         self.conversation_history.append({"role": "assistant", "content": full_response})
@@ -138,9 +149,11 @@ class AgentCore:
 
         # Transition back to IDLE immediately (don't block on memory/character)
         if self.state_machine.state == AgentState.CONVERSING:
+            logger.info("Agent state: CONVERSING -> IDLE (response complete)")
             self.state_machine.transition(AgentState.IDLE, "response complete")
 
         # Fire-and-forget: store memory and update character in background
+        logger.debug("Storing conversation to memory (background)")
         asyncio.create_task(self._post_response_tasks(content, full_response))
 
     async def _post_response_tasks(self, content: str, full_response: str) -> None:
@@ -196,8 +209,13 @@ class AgentCore:
         from clide.autonomy.thinker import Thinker  # Import here to avoid circular
 
         if not self.state_machine.can_transition(AgentState.THINKING):
+            logger.info(
+                "Cannot transition to THINKING (current state: %s)",
+                self.state_machine.state.value,
+            )
             return None
 
+        logger.info("Starting autonomous thinking cycle...")
         self.state_machine.transition(AgentState.THINKING, "scheduled thinking cycle")
 
         try:
@@ -286,6 +304,7 @@ class AgentCore:
             # Fire-and-forget: store thought and update character in background
             asyncio.create_task(self._post_thought_tasks(thought, mood, intensity))
 
+            logger.info("Thought generated: %s", thought.content[:100])
             return thought.content, mood, intensity
 
         except Exception:
@@ -294,6 +313,7 @@ class AgentCore:
         finally:
             # Transition back to IDLE
             if self.state_machine.state == AgentState.THINKING:
+                logger.info("Agent state: THINKING -> IDLE (thinking cycle complete)")
                 self.state_machine.transition(AgentState.IDLE, "thinking cycle complete")
 
     async def clear_history(self) -> None:

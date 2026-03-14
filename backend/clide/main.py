@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
@@ -25,10 +26,20 @@ from clide.core.llm import LLMConfig
 from clide.core.prompts import DEFAULT_SYSTEM_PROMPT
 from clide.memory.amem import AMem
 
+logger = logging.getLogger(__name__)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     """Application lifespan: startup and shutdown."""
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        datefmt="%H:%M:%S",
+    )
+    # Set clide loggers to DEBUG for verbose output
+    logging.getLogger("clide").setLevel(logging.DEBUG)
+
     settings = Settings.from_yaml()
     app.state.settings = settings
 
@@ -38,6 +49,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
         model=settings.agent.llm.model,
         max_tokens=settings.agent.llm.max_tokens,
         api_base=settings.agent.llm.api_base,
+    )
+    logger.info(
+        "Initializing LLM config: provider=%s, model=%s",
+        settings.agent.llm.provider,
+        settings.agent.llm.model,
     )
 
     # Cost tracker
@@ -56,6 +72,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
         traits=PersonalityTraits.from_dict(settings.agent.character.base_traits.model_dump()),
     )
     await character.load()  # Load persisted state if exists
+    trait_dict = character.traits.to_dict()
+    logger.info("Character loaded (traits: %s)", trait_dict)
 
     # Conversation store
     conversation_store = ConversationStore()
@@ -82,6 +100,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
 
     # Define the thinking callback
     async def thinking_callback() -> None:
+        logger.debug("Thinking callback triggered")
         result = await agent_core.autonomous_think()
         if result:
             thought_content, mood, intensity = result
@@ -95,6 +114,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
             from clide.api.websocket import manager as ws_manager
 
             # Broadcast thought to all connected clients
+            logger.info("Thought broadcast to %d clients", len(ws_manager.active_connections))
             await ws_manager.broadcast(
                 WSMessage(
                     type=WSMessageType.THOUGHT,
@@ -119,11 +139,15 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     if settings.agent.states.thinking.interval_seconds > 0:
         scheduler.set_callback(thinking_callback)
         await scheduler.start()
+        interval = settings.agent.states.thinking.interval_seconds
+        logger.info("Autonomy scheduler started (interval: %ss)", interval)
 
     yield
 
     # Shutdown
+    logger.info("Saving character state...")
     await scheduler.stop()
+    logger.info("Scheduler stopped")
     await character.save()
 
 

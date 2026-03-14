@@ -57,6 +57,8 @@ class MoodState:
         If transitioning to a different mood, switch when blended
         intensity exceeds current.
         """
+        old_mood = self.mood
+        old_intensity = self.intensity
         new_intensity = max(0.0, min(1.0, new_intensity))
 
         if new_mood not in VALID_MOODS:
@@ -80,6 +82,21 @@ class MoodState:
         self.intensity = max(0.0, min(1.0, self.intensity))
         self.reason = reason
         self.updated_at = datetime.now(UTC)
+
+        if self.mood != old_mood:
+            logger.info(
+                "Mood transition: %s -> %s (intensity: %.2f)",
+                old_mood,
+                self.mood,
+                self.intensity,
+            )
+        elif abs(self.intensity - old_intensity) > 0.01:
+            logger.debug(
+                "Mood intensity adjusted: %s %.2f -> %.2f",
+                self.mood,
+                old_intensity,
+                self.intensity,
+            )
 
     def describe(self) -> str:
         """Describe current mood for system prompt injection."""

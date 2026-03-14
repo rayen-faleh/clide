@@ -84,6 +84,7 @@ class AMem:
         4. Return the created Zettel
         """
         await self._ensure_initialized()
+        logger.debug("Storing new memory: %s...", content[:80])
 
         # Get existing zettels for link finding
         existing = await self.list_recent(limit=50)
@@ -106,6 +107,7 @@ class AMem:
             },
         )
 
+        logger.info("Memory stored: id=%s, keywords=%s", zettel.id, zettel.keywords)
         return zettel
 
     async def recall(
@@ -120,9 +122,11 @@ class AMem:
         (activation spreading) to find related memories.
         """
         await self._ensure_initialized()
+        logger.debug("Recalling memories for: %s...", query[:80])
 
         # Semantic search via ChromaDB
         search_results = await self.chroma.search(query, limit=limit)
+        logger.debug("Found %d memories via semantic search", len(search_results))
 
         # Load full zettels from SQLite
         zettels: list[Zettel] = []
@@ -149,6 +153,12 @@ class AMem:
                 if zettel and zettel.id not in seen_ids:
                     zettels.append(zettel)
                     seen_ids.add(zettel.id)
+
+            if spread_ids:
+                logger.debug(
+                    "Activation spreading: found %d additional linked memories",
+                    len(spread_ids),
+                )
 
         return zettels
 
