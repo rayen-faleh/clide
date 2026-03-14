@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 from clide.core.cost import CostTracker, DailyUsage, TokenUsage, UsagePurpose
 
@@ -103,7 +103,7 @@ class TestCostTracker:
         stats = tracker.get_stats()
         assert "daily" in stats
         assert "budget" in stats
-        assert stats["daily"]["date"] == date.today().isoformat()
+        assert stats["daily"]["date"] == datetime.now(UTC).date().isoformat()
         assert stats["daily"]["total_tokens"] == 150
         assert stats["daily"]["prompt_tokens"] == 100
         assert stats["daily"]["completion_tokens"] == 50
@@ -125,7 +125,7 @@ class TestCostTracker:
 
     def test_different_days_separate(self) -> None:
         tracker = CostTracker()
-        today = datetime.utcnow()  # noqa: DTZ003
+        today = datetime.now(UTC)
         yesterday = today - timedelta(days=1)
         tracker.record(TokenUsage(total_tokens=100, timestamp=today))
         tracker.record(TokenUsage(total_tokens=200, timestamp=yesterday))

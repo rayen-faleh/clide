@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from enum import StrEnum
 
 logger = logging.getLogger(__name__)
@@ -28,7 +28,7 @@ class TokenUsage:
     total_tokens: int = 0
     purpose: UsagePurpose = UsagePurpose.CHAT
     model: str = ""
-    timestamp: datetime = field(default_factory=datetime.utcnow)  # noqa: DTZ003
+    timestamp: datetime = field(default_factory=lambda: datetime.now(UTC))
 
 
 @dataclass
@@ -77,7 +77,7 @@ class CostTracker:
 
     def get_daily_usage(self, target_date: date | None = None) -> DailyUsage:
         """Get aggregated usage for a specific day (defaults to today)."""
-        target = target_date or date.today()
+        target = target_date or datetime.now(UTC).date()
         daily = DailyUsage(date=target)
 
         for entry in self._usage_log:
