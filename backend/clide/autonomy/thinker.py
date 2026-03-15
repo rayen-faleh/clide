@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import uuid
 from datetime import datetime
 from typing import Any
@@ -13,6 +14,45 @@ from clide.core.llm import LLMConfig, stream_completion
 from clide.memory.processor import _extract_json
 
 logger = logging.getLogger(__name__)
+
+
+def _sanitize_thought(text: str) -> str:
+    """Sanitize thought content — strip tags, markdown artifacts, raw JSON wrappers.
+
+    Handles cases where:
+    - LLM wraps response in <think>...</think> tags
+    - Response is raw JSON (extract the "thought" field)
+    - Response has ```json ``` markdown blocks
+    - Combination of think tags + markdown JSON
+    - Response has leading/trailing whitespace or newlines
+    """
+    text = text.strip()
+    if not text:
+        return "Reflecting quietly..."
+
+    # First, try to extract JSON from the raw text (before stripping anything)
+    # This handles: ```json {...} ```, raw JSON, think tags containing JSON
+    try:
+        data = _extract_json(text)
+        if isinstance(data, dict) and "thought" in data:
+            return str(data["thought"]).strip()
+    except (json.JSONDecodeError, ValueError):
+        pass
+
+    # Strip <think>...</think> tags — keep inner content, strip the tags
+    inner = re.sub(r"</?think>", "", text).strip()
+    if inner and inner != text:
+        # Try extracting JSON from the untagged content
+        try:
+            data = _extract_json(inner)
+            if isinstance(data, dict) and "thought" in data:
+                return str(data["thought"]).strip()
+        except (json.JSONDecodeError, ValueError):
+            pass
+        return inner
+
+    return text
+
 
 THINKING_PROMPT = """You are in your autonomous thinking mode — this is your inner world, \
 where you reflect freely and deeply.
@@ -169,6 +209,8 @@ class Thinker:
         async for chunk in stream_completion(messages, self.llm_config):
             response_text += chunk
 
+        logger.debug("Raw thinker response (%d chars): %s", len(response_text), response_text[:300])
+
         # Parse response using robust JSON extractor
         topic = ""
         follow_up = ""
@@ -177,6 +219,7 @@ class Thinker:
         try:
             data = _extract_json(response_text)
             thought_content = str(data.get("thought", response_text))
+            logger.debug("Parsed thought: %s", thought_content[:100])
             mood = str(data.get("mood", "contemplative"))
             intensity = float(data.get("mood_intensity", 0.5))
             topic = str(data.get("topic", ""))
@@ -186,9 +229,16 @@ class Thinker:
             if isinstance(raw_updates, list):
                 goal_updates_raw = [u for u in raw_updates if isinstance(u, dict)]
         except (json.JSONDecodeError, ValueError, AttributeError):
+            logger.warning(
+                "Failed to parse thought JSON, using raw text. Response: %s",
+                response_text[:300],
+            )
             thought_content = response_text.strip() or "Reflecting quietly..."
             mood = "contemplative"
             intensity = 0.5
+
+        # Sanitize thought content — strip any remaining tags/markdown artifacts
+        thought_content = _sanitize_thought(thought_content)
 
         thought = Thought(
             id=str(uuid.uuid4()),
