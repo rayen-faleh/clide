@@ -127,6 +127,7 @@ async def complete_with_tools(
         "messages": messages,
         "max_tokens": config.max_tokens,
         "tools": tools,
+        "tool_choice": "auto",
         "stream": False,
         **kwargs,
     }
