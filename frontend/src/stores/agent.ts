@@ -41,6 +41,7 @@ export interface ThoughtToolEvent {
 export interface ThoughtEntry {
   content: string
   source: string
+  thoughtType?: string
   timestamp: string
   toolEvents?: ThoughtToolEvent[]
 }
@@ -69,11 +70,12 @@ export const useAgentStore = defineStore('agent', () => {
   }
 
   function handleThought(msg: WSMessage) {
-    const payload = msg.payload as { content: string; source?: string }
+    const payload = msg.payload as { content: string; source?: string; thought_type?: string }
     currentThought.value = payload.content
     thoughts.value.push({
       content: payload.content,
       source: payload.source ?? 'autonomous',
+      thoughtType: payload.thought_type,
       timestamp: msg.timestamp,
       toolEvents:
         pendingThinkingTools.value.length > 0 ? [...pendingThinkingTools.value] : undefined,

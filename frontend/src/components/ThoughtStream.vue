@@ -25,6 +25,17 @@ function formatResult(result: unknown): string {
   const text = typeof result === 'string' ? result : JSON.stringify(result)
   return text.length > 200 ? text.slice(0, 200) + '...' : text
 }
+
+function formatThoughtType(type: string): string {
+  const labels: Record<string, string> = {
+    mind_wandering: 'wandering',
+    self_reflection: 'reflection',
+    scenario_simulation: 'scenario',
+    goal_oriented: 'goal',
+    observation: 'observation',
+  }
+  return labels[type] || type
+}
 </script>
 
 <template>
@@ -37,6 +48,13 @@ function formatResult(result: unknown): string {
           <span class="thought-time">{{ formatTime(thought.timestamp) }}</span>
           <span class="thought-content">{{ thought.content }}</span>
           <span v-if="thought.source === 'autonomous'" class="thought-badge">auto</span>
+          <span
+            v-if="thought.thoughtType"
+            class="thought-type-badge"
+            :class="'type-' + thought.thoughtType"
+          >
+            {{ formatThoughtType(thought.thoughtType) }}
+          </span>
           <span
             v-if="thought.toolEvents?.length"
             class="tool-badge"
@@ -205,5 +223,40 @@ function formatResult(result: unknown): string {
   color: #f44336;
   font-size: 10px;
   margin-top: 4px;
+}
+
+.thought-type-badge {
+  flex-shrink: 0;
+  font-size: 0.65rem;
+  padding: 1px 6px;
+  border-radius: 3px;
+  text-transform: uppercase;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+}
+
+.type-mind_wandering {
+  background: rgba(136, 136, 136, 0.2);
+  color: #aaa;
+}
+
+.type-self_reflection {
+  background: rgba(156, 39, 176, 0.2);
+  color: #ce93d8;
+}
+
+.type-scenario_simulation {
+  background: rgba(33, 150, 243, 0.2);
+  color: #64b5f6;
+}
+
+.type-goal_oriented {
+  background: rgba(76, 175, 80, 0.2);
+  color: #81c784;
+}
+
+.type-observation {
+  background: rgba(255, 152, 0, 0.2);
+  color: #ffb74d;
 }
 </style>
