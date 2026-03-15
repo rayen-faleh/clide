@@ -97,7 +97,18 @@ class AgentCore:
 
         for iteration in range(max_iterations):
             logger.info("Tool loop iteration %d/%d", iteration + 1, max_iterations)
-            response = await complete_with_tools(messages, self.llm_config, tools)
+            try:
+                response = await complete_with_tools(messages, self.llm_config, tools)
+            except Exception:
+                logger.exception("LLM call failed in tool loop (iteration %d)", iteration + 1)
+                if iteration > 0:
+                    # We already executed tools — return a summary of what happened
+                    return (
+                        "I used some tools but couldn't finish processing the results. "
+                        "The tool results are shown above — you can ask me to try again."
+                    )
+                raise  # First iteration = no tools called yet, let it propagate
+
             choice = response.choices[0]
             logger.debug(
                 "LLM response: finish_reason=%s, has_tool_calls=%s, has_content=%s",
