@@ -35,3 +35,7 @@ data/
 
 # MCP
 .mcp.json
+
+# QA/Testing artifacts
+.playwright-mcp/
+qa-*.png
