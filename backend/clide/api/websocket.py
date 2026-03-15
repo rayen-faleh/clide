@@ -100,9 +100,24 @@ class ConnectionManager:
 manager = ConnectionManager()
 
 
+ALLOWED_ORIGINS = {
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://localhost:8000",
+    "http://127.0.0.1:8000",
+}
+
+
 @ws_router.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket) -> None:
     """Main WebSocket endpoint for agent communication."""
+    # Validate origin to prevent cross-site WebSocket hijacking (ClawJacked-style)
+    origin = websocket.headers.get("origin", "")
+    if origin and origin not in ALLOWED_ORIGINS:
+        logger.warning("WebSocket connection rejected: unauthorized origin '%s'", origin)
+        await websocket.close(code=4003, reason="Unauthorized origin")
+        return
+
     await manager.connect(websocket)
     core = get_agent_core()
 
