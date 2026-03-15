@@ -379,6 +379,213 @@ Set the environment variable: `export ANTHROPIC_API_KEY=your-key-here`
 
 ---
 
+## LLM Provider Configuration
+
+CLIDE uses [litellm](https://github.com/BerriAI/litellm) for multi-provider LLM support. All configuration lives in `config/agent.yaml` under the `llm` section. You can switch providers by changing a few lines of YAML and (for cloud providers) setting an environment variable.
+
+### Ollama (Local, Free)
+
+```yaml
+llm:
+  provider: ollama
+  model: llama3.2
+  max_tokens: 4096
+  api_base: ""  # Leave empty for default localhost:11434
+```
+
+- Install: `brew install ollama` or from [ollama.com](https://ollama.com)
+- Pull a model: `ollama pull llama3.2`
+- Start the server: `ollama serve`
+- No API key needed
+- **Note:** Some models (like qwen3.5) use "thinking mode" where tokens arrive as `reasoning_content` instead of regular content. CLIDE handles this automatically and will surface the reasoning tokens if no standard content is produced.
+- **Note:** Leave `api_base` empty. litellm handles the Ollama URL automatically. Setting it explicitly can cause URL doubling issues.
+- Recommended models: `llama3.2`, `qwen3:4b`, `mistral` (for local use)
+
+### Anthropic (Claude)
+
+```yaml
+llm:
+  provider: anthropic
+  model: claude-sonnet-4-20250514
+  max_tokens: 4096
+  api_base: ""
+```
+
+- Set env: `export ANTHROPIC_API_KEY=sk-ant-...`
+- Available models: `claude-sonnet-4-20250514`, `claude-haiku-4-5-20251001`, `claude-opus-4-6`
+- Best tool calling support
+- Get API key from [console.anthropic.com](https://console.anthropic.com)
+
+### Google Gemini
+
+```yaml
+llm:
+  provider: gemini
+  model: gemini-2.5-flash
+  max_tokens: 4096
+  api_base: ""
+```
+
+- Set env: `export GEMINI_API_KEY=your-key`
+- Available models: `gemini-2.5-flash`, `gemini-2.5-pro`, `gemma-3-27b-it`
+- Get API key from [ai.google.dev](https://ai.google.dev)
+
+### Mistral AI
+
+```yaml
+llm:
+  provider: mistral
+  model: mistral-small-latest
+  max_tokens: 4096
+  api_base: ""
+```
+
+- Set env: `export MISTRAL_API_KEY=your-key`
+- Available models: `mistral-small-latest`, `mistral-medium-latest`, `mistral-large-latest`, `codestral-latest`
+- **Note:** Mistral has rate limits. CLIDE handles rate limit errors gracefully during tool calls.
+- Get API key from [console.mistral.ai](https://console.mistral.ai)
+
+### OpenAI
+
+```yaml
+llm:
+  provider: openai
+  model: gpt-4o
+  max_tokens: 4096
+  api_base: ""
+```
+
+- Set env: `export OPENAI_API_KEY=sk-...`
+- Available models: `gpt-4o`, `gpt-4o-mini`, `gpt-4-turbo`, `o1`
+- Get API key from [platform.openai.com](https://platform.openai.com)
+
+### NVIDIA Build (build.nvidia.com)
+
+```yaml
+llm:
+  provider: openai
+  model: nvidia/llama-3.1-nemotron-70b-instruct
+  max_tokens: 4096
+  api_base: "https://integrate.api.nvidia.com/v1"
+```
+
+- Set env: `export OPENAI_API_KEY=nvapi-...`
+- Uses OpenAI-compatible endpoint with a custom `api_base`
+- Browse models at [build.nvidia.com](https://build.nvidia.com)
+- **Note:** The provider is set to `openai` because NVIDIA uses the OpenAI-compatible API format.
+
+### Any OpenAI-Compatible Endpoint
+
+```yaml
+llm:
+  provider: openai
+  model: your-model-name
+  max_tokens: 4096
+  api_base: "https://your-endpoint.com/v1"
+```
+
+- Set env: `export OPENAI_API_KEY=your-key`
+- Works with any OpenAI-compatible API (vLLM, Together AI, Groq, etc.)
+
+### How Provider Routing Works
+
+Internally, litellm uses the `provider/model` format to route requests. For Anthropic, just the model name is used (e.g., `claude-sonnet-4-20250514`). For all other providers, CLIDE builds the string `{provider}/{model}` (e.g., `ollama/llama3.2`, `openai/gpt-4o`). The `api_base` field is only needed for custom endpoints like NVIDIA or self-hosted servers. For standard providers (Ollama, Anthropic, OpenAI, Mistral, Gemini), leave it empty.
+
+### Tips
+
+- CLIDE limits concurrent LLM calls to 2 (semaphore) to prevent overloading local or rate-limited providers.
+- The default connection timeout is 10 minutes, which accommodates slow local models.
+- Thinking models (qwen3.5, etc.) are handled automatically — reasoning tokens are captured and surfaced if the model produces no standard content tokens.
+- Changes to LLM provider or model require a backend restart.
+- Changes to the system prompt and personality traits via the Settings page take effect immediately (no restart needed).
+
+---
+
+## Tool Configuration (MCP Servers)
+
+CLIDE uses the [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) to integrate external tools. Tools are configured in `config/tools.yaml`.
+
+### Configuration Format
+
+```yaml
+tools:
+  - name: web_search          # Unique name for the tool
+    transport: stdio           # Transport type (stdio only for now)
+    command: mcp-searxng       # Command to start the MCP server
+    args: []                   # Command arguments
+    env:                       # Environment variables for the server
+      SEARXNG_URL: "http://localhost:8888"
+    enabled: true              # Enable/disable without removing
+    description: "Search the web using SearXNG"
+```
+
+### Example: SearXNG Web Search
+
+```yaml
+tools:
+  - name: web_search
+    transport: stdio
+    command: uvx
+    args: ["mcp-searxng"]
+    env:
+      SEARXNG_URL: "http://localhost:8888"
+    enabled: true
+    description: "Search the web using SearXNG"
+```
+
+**Prerequisites:**
+
+- SearXNG running (e.g., via Docker: `docker run -p 8888:8080 searxng/searxng`)
+- Enable the JSON API in SearXNG settings (`/etc/searxng/settings.yml`):
+  ```yaml
+  search:
+    formats:
+      - html
+      - json
+  server:
+    limiter: false
+  ```
+- Install the MCP server: `uvx mcp-searxng` (or `pip install mcp-searxng`)
+
+### Example: Filesystem Access
+
+```yaml
+tools:
+  - name: filesystem
+    transport: stdio
+    command: npx
+    args: ["-y", "@anthropic/mcp-filesystem", "/path/to/allowed/directory"]
+    enabled: true
+    description: "Read and write files"
+```
+
+### How Tools Work
+
+- On startup, CLIDE connects to all enabled MCP servers listed in `config/tools.yaml`.
+- Tool definitions are discovered automatically via the MCP protocol (`tools/list`).
+- During conversations, tools are passed to the LLM, which decides when to use them.
+- During autonomous thinking, the agent can also use tools (two-phase: explore with tools, then reflect).
+- Tool calls and results appear as collapsible cards in the chat UI.
+- In the thought stream, tool usage shows as an expandable annotation.
+
+### Adding Custom Tools
+
+Any MCP-compatible server works with CLIDE. The server must:
+
+1. Accept stdio communication (stdin/stdout)
+2. Implement the MCP protocol (`initialize`, `tools/list`, `tools/call`)
+3. Be executable via the configured command
+
+### Troubleshooting
+
+- Check backend logs for `Tool registry initialized: N servers, N tools` to verify tools loaded.
+- If tools are not discovered, check that the MCP server command is correct and executable.
+- If the LLM does not use tools, ensure your model supports function/tool calling.
+- SearXNG 403 errors usually mean the JSON format is not enabled in SearXNG settings (see above).
+- Tools require `tool_choice: auto` in the LLM call. CLIDE sets this automatically.
+
+---
+
 ## Development
 
 | Command | What it does |
