@@ -575,6 +575,16 @@ class AgentCore:
 
                     thought_history = "\n".join(thought_parts)
 
+            # --- Gather tools context ---
+            tools_context = ""
+            if self.tool_registry:
+                tool_defs = self.tool_registry.get_tool_definitions_for_llm()
+                if tool_defs:
+                    tools_context = "\n".join(
+                        f"- {t['function']['name']}: {t['function'].get('description', '')}"
+                        for t in tool_defs
+                    )
+
             # --- Think ---
             max_goals = 5
             thought, mood, intensity = await thinker.think(
@@ -583,6 +593,7 @@ class AgentCore:
                 personality_context=personality_context,
                 goals_context=goals_context,
                 opinions_context=opinions_context,
+                tools_context=tools_context,
                 thought_history=thought_history,
                 system_prompt=self.system_prompt,
                 max_goals=max_goals if current_goal_count < max_goals else 0,

@@ -32,6 +32,8 @@ disagree, wonder, speculate. This is your mind and yours alone.
 
 {opinions_context}
 
+{tools_context}
+
 {thought_history}
 
 IMPORTANT: The thoughts listed above are your PREVIOUS thoughts. Do NOT repeat them. \
@@ -81,6 +83,7 @@ class Thinker:
         personality_context: str = "",
         goals_context: str = "",
         opinions_context: str = "",
+        tools_context: str = "",
         thought_history: str = "",
         system_prompt: str = "",
         max_goals: int = 5,
@@ -121,6 +124,11 @@ class Thinker:
             goals_context=(f"Your active goals:\n{goals_context or '(none yet)'}"),
             opinions_context=(
                 f"Your current opinions:\n{opinions_context}" if opinions_context else ""
+            ),
+            tools_context=(
+                f"Your available tools (usable during conversations):\n{tools_context}"
+                if tools_context
+                else ""
             ),
             thought_history=(
                 f"Your recent thoughts:\n{thought_history}" if thought_history else ""
