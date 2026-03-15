@@ -30,10 +30,19 @@ export interface ToolEvent {
 
 export type MessageItem = ChatEntry | ToolEvent
 
+export interface ThoughtToolEvent {
+  tool_name: string
+  arguments: Record<string, unknown>
+  call_id: string
+  result?: unknown
+  error?: string | null
+}
+
 export interface ThoughtEntry {
   content: string
   source: string
   timestamp: string
+  toolEvents?: ThoughtToolEvent[]
 }
 
 export const useAgentStore = defineStore('agent', () => {
@@ -42,6 +51,9 @@ export const useAgentStore = defineStore('agent', () => {
   const currentThought = ref<string | null>(null)
   const thoughts = ref<ThoughtEntry[]>([])
   const connected = ref(false)
+
+  // Pending tool events that occur during thinking, before a thought arrives
+  const pendingThinkingTools = ref<ThoughtToolEvent[]>([])
 
   // Chat state — persists across navigation
   const messages = ref<MessageItem[]>([])
@@ -63,7 +75,28 @@ export const useAgentStore = defineStore('agent', () => {
       content: payload.content,
       source: payload.source ?? 'autonomous',
       timestamp: msg.timestamp,
+      toolEvents:
+        pendingThinkingTools.value.length > 0 ? [...pendingThinkingTools.value] : undefined,
     })
+    pendingThinkingTools.value = []
+  }
+
+  function handleThinkingToolCall(msg: WSMessage) {
+    const payload = msg.payload as unknown as ToolCallPayload
+    pendingThinkingTools.value.push({
+      tool_name: payload.tool_name,
+      arguments: payload.arguments,
+      call_id: payload.call_id,
+    })
+  }
+
+  function handleThinkingToolResult(msg: WSMessage) {
+    const payload = msg.payload as unknown as ToolResultPayload
+    const event = pendingThinkingTools.value.find((e) => e.call_id === payload.call_id)
+    if (event) {
+      event.result = payload.result
+      event.error = payload.error
+    }
   }
 
   function setConnected(value: boolean) {
@@ -134,6 +167,8 @@ export const useAgentStore = defineStore('agent', () => {
     handleStateChange,
     handleMoodUpdate,
     handleThought,
+    handleThinkingToolCall,
+    handleThinkingToolResult,
     setConnected,
     addMessage,
     updateLastAssistant,

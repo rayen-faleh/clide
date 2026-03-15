@@ -45,4 +45,61 @@ describe('ThoughtStream', () => {
     // Should render some time representation
     expect(wrapper.find('.thought-time').exists()).toBe(true)
   })
+
+  it('renders tool badge when toolEvents present', () => {
+    const thoughts = [
+      createThought({
+        content: 'Thought with tools',
+        toolEvents: [
+          {
+            tool_name: 'search_files',
+            arguments: { query: 'test' },
+            call_id: 'call-1',
+            result: 'found 3 files',
+          },
+        ],
+      }),
+    ]
+    const wrapper = mount(ThoughtStream, {
+      props: { thoughts },
+    })
+
+    expect(wrapper.find('.tool-badge').exists()).toBe(true)
+  })
+
+  it('tool badge shows correct count', () => {
+    const thoughts = [
+      createThought({
+        content: 'Thought with multiple tools',
+        toolEvents: [
+          {
+            tool_name: 'search_files',
+            arguments: { query: 'test' },
+            call_id: 'call-1',
+          },
+          {
+            tool_name: 'read_file',
+            arguments: { path: '/foo' },
+            call_id: 'call-2',
+            result: 'file contents',
+          },
+        ],
+      }),
+    ]
+    const wrapper = mount(ThoughtStream, {
+      props: { thoughts },
+    })
+
+    const badge = wrapper.find('.tool-badge')
+    expect(badge.text()).toContain('2 tool(s) used')
+  })
+
+  it('does not render tool badge when no toolEvents', () => {
+    const thoughts = [createThought({ content: 'Plain thought' })]
+    const wrapper = mount(ThoughtStream, {
+      props: { thoughts },
+    })
+
+    expect(wrapper.find('.tool-badge').exists()).toBe(false)
+  })
 })
