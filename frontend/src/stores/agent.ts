@@ -124,6 +124,11 @@ export const useAgentStore = defineStore('agent', () => {
   }
 
   function handleToolCall(msg: WSMessage) {
+    // Only add to chat messages if agent is not thinking — during thinking,
+    // DashboardView's handleThinkingToolCall handles it via pendingThinkingTools
+    if (state.value === 'thinking') {
+      return
+    }
     const payload = msg.payload as unknown as ToolCallPayload
     const event: ToolEvent = {
       id: crypto.randomUUID(),
@@ -138,6 +143,10 @@ export const useAgentStore = defineStore('agent', () => {
   }
 
   function handleToolResult(msg: WSMessage) {
+    // Skip chat message update during thinking — dashboard handles it
+    if (state.value === 'thinking') {
+      return
+    }
     const payload = msg.payload as unknown as ToolResultPayload
     const event = [...messages.value]
       .reverse()
