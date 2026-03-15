@@ -7,6 +7,7 @@ from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -137,7 +138,42 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     # Define the thinking callback
     async def thinking_callback() -> None:
         logger.debug("Thinking callback triggered")
+
+        # Set tool event callback so tool use during thinking is broadcast
+        async def thinking_tool_handler(event: dict[str, Any]) -> None:
+            from clide.api.schemas import (
+                ToolCallPayload,
+                ToolResultPayload,
+                WSMessage,
+                WSMessageType,
+            )
+            from clide.api.websocket import manager as ws_manager
+
+            await ws_manager.broadcast(
+                WSMessage(
+                    type=WSMessageType.TOOL_CALL,
+                    payload=ToolCallPayload(
+                        tool_name=event.get("tool_name", ""),
+                        arguments=event.get("arguments", {}),
+                        call_id=event.get("call_id", ""),
+                    ).model_dump(),
+                )
+            )
+            await ws_manager.broadcast(
+                WSMessage(
+                    type=WSMessageType.TOOL_RESULT,
+                    payload=ToolResultPayload(
+                        call_id=event.get("call_id", ""),
+                        result=event.get("result"),
+                        error=event.get("error"),
+                    ).model_dump(),
+                )
+            )
+
+        agent_core.set_tool_event_callback(thinking_tool_handler)
         result = await agent_core.autonomous_think()
+        agent_core.set_tool_event_callback(None)  # Clear after thinking
+
         if result:
             thought_content, mood, intensity = result
             # Late import to avoid circular imports

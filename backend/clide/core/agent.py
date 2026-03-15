@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import inspect
 import json as json_mod
 import logging
 from collections.abc import AsyncIterator
@@ -588,6 +589,7 @@ class AgentCore:
 
             # --- Gather tools context ---
             tools_context = ""
+            tool_defs: list[dict[str, Any]] = []
             if self.tool_registry:
                 tool_defs = self.tool_registry.get_tool_definitions_for_llm()
                 if tool_defs:
@@ -596,19 +598,67 @@ class AgentCore:
                         for t in tool_defs
                     )
 
-            # --- Think ---
+            # --- Phase 1: Tool exploration (optional) ---
+            tool_results_context = ""
+            if self.tool_registry and tool_defs:
+                tool_prompt = (
+                    "You are in your autonomous thinking mode. "
+                    "Based on your current thoughts, goals, and curiosity, "
+                    "would you like to use any of your available tools to learn something? "
+                    "If yes, call the appropriate tool. "
+                    "If no, just respond with a short message like "
+                    "'No tools needed right now.'\n\n"
+                    f"Your current focus: {topic_query}\n"
+                    f"Your goals: {goals_context}\n"
+                )
+                tool_messages: list[dict[str, Any]] = [
+                    {"role": "system", "content": self.system_prompt},
+                    {"role": "user", "content": tool_prompt},
+                ]
+
+                try:
+                    tool_response = await self._process_with_tools(tool_messages, tool_defs)
+                    if tool_response and "no tools" not in tool_response.lower():
+                        tool_results_context = tool_response
+                        logger.info(
+                            "Thinking phase 1: used tools, got %d chars of context",
+                            len(tool_response),
+                        )
+                    else:
+                        logger.debug("Thinking phase 1: no tools used")
+                except Exception:
+                    logger.warning("Thinking phase 1 tool exploration failed", exc_info=True)
+
+            # --- Phase 2: Generate thought (existing flow) ---
             max_goals = 5
-            thought, mood, intensity = await thinker.think(
-                memory_context=memory_context,
-                mood_context=mood_context,
-                personality_context=personality_context,
-                goals_context=goals_context,
-                opinions_context=opinions_context,
-                tools_context=tools_context,
-                thought_history=thought_history,
-                system_prompt=self.system_prompt,
-                max_goals=max_goals if current_goal_count < max_goals else 0,
-            )
+            think_kwargs: dict[str, Any] = {
+                "memory_context": memory_context,
+                "mood_context": mood_context,
+                "personality_context": personality_context,
+                "goals_context": goals_context,
+                "opinions_context": opinions_context,
+                "tools_context": tools_context,
+                "thought_history": thought_history,
+                "system_prompt": self.system_prompt,
+                "max_goals": max_goals if current_goal_count < max_goals else 0,
+            }
+            # Pass tool_results_context only if the thinker accepts it
+            # (added by another agent in parallel)
+            if tool_results_context:
+                sig = inspect.signature(thinker.think)
+                if "tool_results_context" in sig.parameters:
+                    think_kwargs["tool_results_context"] = tool_results_context
+                else:
+                    # Append to tools_context as fallback
+                    think_kwargs["tools_context"] = (
+                        f"{tools_context}\n\nTool results from exploration:\n{tool_results_context}"
+                    )
+            thought, mood, intensity = await thinker.think(**think_kwargs)
+
+            # Store tool usage in thought metadata
+            if tool_results_context:
+                thought.metadata["used_tools"] = "true"
+                thought.metadata["tool_results_preview"] = tool_results_context[:300]
 
             # Handle goal creation/updates from thought metadata
             if self.goal_manager:

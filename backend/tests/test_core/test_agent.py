@@ -1099,3 +1099,130 @@ class TestProcessWithTools:
             async for chunk in agent.process_message("hi"):
                 chunks.append(chunk)
         assert chunks == ["Hello", " there", "!"]
+
+
+class TestAutonomousThinkWithTools:
+    """Tests for tool support in autonomous thinking (two-phase approach)."""
+
+    @pytest.mark.asyncio
+    async def test_autonomous_think_with_tools(self) -> None:
+        """Phase 1 runs when tool_registry has tools, and results are passed to thinker."""
+        registry = _make_mock_registry()
+        agent = AgentCore(tool_registry=registry)
+
+        mock_thought = MagicMock()
+        mock_thought.content = "I learned something from tools"
+        mock_thought.metadata = {"topic": "research", "follow_up": ""}
+
+        captured_kwargs: dict[str, object] = {}
+
+        async def capturing_think(**kwargs: object) -> tuple[MagicMock, str, float]:
+            captured_kwargs.update(kwargs)
+            return mock_thought, "curious", 0.8
+
+        # Phase 1: _process_with_tools returns tool results
+        with (
+            patch("clide.autonomy.thinker.Thinker") as mock_thinker_cls,
+            patch.object(
+                agent,
+                "_process_with_tools",
+                new_callable=AsyncMock,
+                return_value="Tool result: some useful data from web search",
+            ) as mock_pwt,
+        ):
+            thinker_instance = MagicMock()
+            thinker_instance.think = capturing_think
+            mock_thinker_cls.return_value = thinker_instance
+
+            result = await agent.autonomous_think()
+
+        assert result is not None
+        assert result[0] == "I learned something from tools"
+
+        # Phase 1 should have been called
+        mock_pwt.assert_awaited_once()
+
+        # Tool results should be incorporated into thinker context.
+        # If thinker accepts tool_results_context param, it's passed directly;
+        # otherwise it's appended to tools_context as a fallback.
+        tools_ctx = str(captured_kwargs.get("tools_context", ""))
+        has_direct = captured_kwargs.get("tool_results_context") is not None
+        assert has_direct or "Tool results from exploration:" in tools_ctx
+
+        # Thought metadata should record tool usage
+        assert mock_thought.metadata["used_tools"] == "true"
+        assert "some useful data" in mock_thought.metadata["tool_results_preview"]
+
+    @pytest.mark.asyncio
+    async def test_autonomous_think_without_tools(self) -> None:
+        """Phase 1 is skipped when no tool_registry is set."""
+        agent = AgentCore()  # No tool_registry
+
+        mock_thought = MagicMock()
+        mock_thought.content = "standalone thought"
+        mock_thought.metadata = {"topic": "", "follow_up": ""}
+
+        captured_kwargs: dict[str, object] = {}
+
+        async def capturing_think(**kwargs: object) -> tuple[MagicMock, str, float]:
+            captured_kwargs.update(kwargs)
+            return mock_thought, "neutral", 0.5
+
+        with patch("clide.autonomy.thinker.Thinker") as mock_thinker_cls:
+            thinker_instance = MagicMock()
+            thinker_instance.think = capturing_think
+            mock_thinker_cls.return_value = thinker_instance
+
+            result = await agent.autonomous_think()
+
+        assert result is not None
+        # tool_results_context should NOT be passed (Phase 1 skipped, empty string)
+        assert "tool_results_context" not in captured_kwargs
+        # tools_context should not have tool exploration results
+        tools_ctx = str(captured_kwargs.get("tools_context", ""))
+        assert "Tool results from exploration:" not in tools_ctx
+        # No tool metadata should be set
+        assert "used_tools" not in mock_thought.metadata
+
+    @pytest.mark.asyncio
+    async def test_autonomous_think_tool_failure_continues(self) -> None:
+        """Phase 1 failure does not block Phase 2 thinking."""
+        registry = _make_mock_registry()
+        agent = AgentCore(tool_registry=registry)
+
+        mock_thought = MagicMock()
+        mock_thought.content = "thought despite tool failure"
+        mock_thought.metadata = {"topic": "", "follow_up": ""}
+
+        captured_kwargs: dict[str, object] = {}
+
+        async def capturing_think(**kwargs: object) -> tuple[MagicMock, str, float]:
+            captured_kwargs.update(kwargs)
+            return mock_thought, "neutral", 0.5
+
+        # Phase 1: _process_with_tools raises an exception
+        with (
+            patch("clide.autonomy.thinker.Thinker") as mock_thinker_cls,
+            patch.object(
+                agent,
+                "_process_with_tools",
+                new_callable=AsyncMock,
+                side_effect=RuntimeError("MCP server down"),
+            ),
+        ):
+            thinker_instance = MagicMock()
+            thinker_instance.think = capturing_think
+            mock_thinker_cls.return_value = thinker_instance
+
+            result = await agent.autonomous_think()
+
+        # Phase 2 should still succeed
+        assert result is not None
+        assert result[0] == "thought despite tool failure"
+        # tool_results_context should NOT be passed (Phase 1 failed, empty string)
+        assert "tool_results_context" not in captured_kwargs
+        # tools_context should not have tool exploration results
+        tools_ctx = str(captured_kwargs.get("tools_context", ""))
+        assert "Tool results from exploration:" not in tools_ctx
+        # No tool metadata should be set
+        assert "used_tools" not in mock_thought.metadata
