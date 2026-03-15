@@ -96,9 +96,15 @@ class AgentCore:
         max_iterations = 10
 
         for iteration in range(max_iterations):
-            logger.info("Tool loop iteration %d", iteration + 1)
+            logger.info("Tool loop iteration %d/%d", iteration + 1, max_iterations)
             response = await complete_with_tools(messages, self.llm_config, tools)
             choice = response.choices[0]
+            logger.debug(
+                "LLM response: finish_reason=%s, has_tool_calls=%s, has_content=%s",
+                choice.finish_reason,
+                bool(choice.message.tool_calls) if hasattr(choice.message, "tool_calls") else "N/A",
+                bool(choice.message.content),
+            )
 
             # Check if LLM wants to call tools
             if choice.finish_reason == "tool_calls" and choice.message.tool_calls:
@@ -125,13 +131,18 @@ class AgentCore:
                         arguments = {}
                     call_id = tool_call.id
 
-                    logger.info("Executing tool: %s(%s)", tool_name, arguments)
+                    logger.info("Executing tool: %s(args=%s)", tool_name, str(arguments)[:200])
 
                     # Execute via registry
                     assert self.tool_registry is not None
                     result = await self.tool_registry.execute_tool(tool_name, arguments)
 
-                    logger.info("Tool result: success=%s", result.success)
+                    logger.info(
+                        "Tool %s result: success=%s, result_preview=%s",
+                        tool_name,
+                        result.success,
+                        str(result.result)[:150] if result.success else f"ERROR: {result.error}",
+                    )
 
                     # Notify callback (WebSocket handler broadcasts this)
                     if self._tool_event_callback:
@@ -172,7 +183,13 @@ class AgentCore:
 
             else:
                 # LLM generated text response (no more tool calls)
-                return choice.message.content or ""
+                text = choice.message.content or ""
+                logger.info(
+                    "Tool loop done: %d iteration(s), %d chars",
+                    iteration + 1,
+                    len(text),
+                )
+                return text
 
         # Safety: too many iterations
         logger.warning("Tool loop hit max iterations (%d)", max_iterations)
@@ -251,16 +268,23 @@ class AgentCore:
         tool_definitions: list[dict[str, Any]] = []
         if self.tool_registry:
             tool_definitions = self.tool_registry.get_tool_definitions_for_llm()
+            logger.debug(
+                "Tool registry: %d tool(s) available: %s",
+                len(tool_definitions),
+                [t["function"]["name"] for t in tool_definitions] if tool_definitions else "none",
+            )
+        else:
+            logger.debug("No tool registry configured")
 
         full_response = ""
         if tool_definitions:
             # TOOL-AWARE PATH: non-streaming with tool loop
-            logger.info("Using tool-aware path (%d tools available)", len(tool_definitions))
+            logger.info("Using tool-aware path (%d tools)", len(tool_definitions))
             full_response = await self._process_with_tools(messages, tool_definitions)
             yield full_response
         else:
             # SIMPLE PATH: streaming without tools (existing behavior)
-            logger.info("Streaming LLM response...")
+            logger.info("Streaming LLM response (no tools)...")
             async for chunk in stream_completion(messages, self.llm_config):
                 full_response += chunk
                 yield chunk
@@ -358,9 +382,15 @@ class AgentCore:
     async def _process_thought_goals(self, thought: object) -> None:
         """Process goal creation and updates from a thought's metadata."""
         if not self.goal_manager:
+            logger.debug("No goal manager, skipping goal processing")
             return
 
         meta = getattr(thought, "metadata", {}) or {}
+        logger.debug(
+            "Processing thought goals: new_goal=%s, has_updates=%s",
+            repr(meta.get("new_goal", ""))[:80],
+            bool(meta.get("goal_updates", "")),
+        )
 
         # Create new goal if proposed
         new_goal_desc = meta.get("new_goal", "")
@@ -380,7 +410,8 @@ class AgentCore:
         if goal_updates_raw and isinstance(goal_updates_raw, str):
             try:
                 updates = json_mod.loads(goal_updates_raw)
-                if isinstance(updates, list):
+                if isinstance(updates, list) and updates:
+                    logger.info("Processing %d goal update(s)", len(updates))
                     active_goals = await self.goal_manager.get_active()
                     for update in updates:
                         if not isinstance(update, dict):
@@ -395,6 +426,7 @@ class AgentCore:
                             None,
                         )
                         if not goal:
+                            logger.debug("Goal update skipped: no match for '%s'", desc[:50])
                             continue
 
                         progress = update.get("progress")
