@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 
+import aiosqlite
 import pytest
 
 from clide.autonomy.goals import GoalManager
@@ -117,3 +119,62 @@ class TestGoalManager:
         await goal_manager.create("Learn about astronomy")
         found = await goal_manager.find_by_description("nonexistent topic")
         assert found is None
+
+
+class TestGoalExpiry:
+    """Tests for goal auto-expiry."""
+
+    async def test_expire_stale(self, goal_manager: GoalManager) -> None:
+        """Create an old goal, verify it gets abandoned."""
+        from datetime import timedelta
+
+        goal = await goal_manager.create("Old stale goal")
+        # Manually backdate the updated_at to 3 hours ago
+        old_time = (datetime.utcnow() - timedelta(hours=3)).isoformat()
+        async with aiosqlite.connect(goal_manager.db_path) as db:
+            await db.execute(
+                "UPDATE goals SET updated_at = ? WHERE id = ?",
+                (old_time, goal.id),
+            )
+            await db.commit()
+
+        expired = await goal_manager.expire_stale()
+        assert len(expired) == 1
+        assert expired[0].id == goal.id
+
+        # Verify it's now abandoned in the DB
+        updated = await goal_manager.get(goal.id)
+        assert updated is not None
+        assert updated.status == GoalStatus.ABANDONED
+        assert "Auto-expired" in updated.notes
+
+    async def test_expire_stale_keeps_recent(self, goal_manager: GoalManager) -> None:
+        """Create a recent goal, verify it stays active."""
+        goal = await goal_manager.create("Fresh goal")
+
+        expired = await goal_manager.expire_stale()
+        assert len(expired) == 0
+
+        # Verify it's still active
+        fetched = await goal_manager.get(goal.id)
+        assert fetched is not None
+        assert fetched.status == GoalStatus.ACTIVE
+
+    async def test_expire_stale_ignores_completed(self, goal_manager: GoalManager) -> None:
+        """Completed goals should not be expired even if old."""
+        from datetime import timedelta
+
+        goal = await goal_manager.create("Completed goal")
+        await goal_manager.update(goal.id, status=GoalStatus.COMPLETED)
+
+        # Backdate
+        old_time = (datetime.utcnow() - timedelta(hours=3)).isoformat()
+        async with aiosqlite.connect(goal_manager.db_path) as db:
+            await db.execute(
+                "UPDATE goals SET updated_at = ? WHERE id = ?",
+                (old_time, goal.id),
+            )
+            await db.commit()
+
+        expired = await goal_manager.expire_stale()
+        assert len(expired) == 0

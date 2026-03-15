@@ -1226,3 +1226,128 @@ class TestAutonomousThinkWithTools:
         assert "Tool results from exploration:" not in tools_ctx
         # No tool metadata should be set
         assert "used_tools" not in mock_thought.metadata
+
+
+class TestAntiTunnelVision:
+    """Tests for topic tracking and diversity enforcement."""
+
+    @pytest.mark.asyncio
+    async def test_topic_tracking(self) -> None:
+        """Verify _recent_topics is updated after thinking."""
+        agent = AgentCore()
+
+        mock_thought = MagicMock()
+        mock_thought.content = "Thinking about stars"
+        mock_thought.metadata = {"topic": "astronomy", "follow_up": ""}
+
+        with patch("clide.autonomy.thinker.Thinker") as mock_thinker_cls:
+            thinker_instance = MagicMock()
+            thinker_instance.think = AsyncMock(return_value=(mock_thought, "curious", 0.7))
+            mock_thinker_cls.return_value = thinker_instance
+
+            await agent.autonomous_think()
+
+        assert "astronomy" in agent._recent_topics
+
+    @pytest.mark.asyncio
+    async def test_topic_history_capped(self) -> None:
+        """Verify topic history is capped at _topic_history_size."""
+        agent = AgentCore()
+        agent._topic_history_size = 3
+
+        topics = ["stars", "music", "food", "code"]
+        for topic in topics:
+            mock_thought = MagicMock()
+            mock_thought.content = f"Thinking about {topic}"
+            mock_thought.metadata = {"topic": topic, "follow_up": ""}
+
+            with patch("clide.autonomy.thinker.Thinker") as mock_thinker_cls:
+                thinker_instance = MagicMock()
+                thinker_instance.think = AsyncMock(return_value=(mock_thought, "curious", 0.5))
+                mock_thinker_cls.return_value = thinker_instance
+
+                await agent.autonomous_think()
+
+        assert len(agent._recent_topics) == 3
+        assert agent._recent_topics == ["music", "food", "code"]
+
+    @pytest.mark.asyncio
+    async def test_diversity_instruction_triggered(self) -> None:
+        """When same topic appears 3+ times, diversity text is prepended."""
+        agent = AgentCore()
+        agent._recent_topics = ["ai", "ai", "ai"]
+
+        captured_kwargs: dict[str, object] = {}
+
+        mock_thought = MagicMock()
+        mock_thought.content = "Something different"
+        mock_thought.metadata = {"topic": "nature", "follow_up": ""}
+
+        async def capturing_think(**kwargs: object) -> tuple[MagicMock, str, float]:
+            captured_kwargs.update(kwargs)
+            return mock_thought, "curious", 0.5
+
+        with patch("clide.autonomy.thinker.Thinker") as mock_thinker_cls:
+            thinker_instance = MagicMock()
+            thinker_instance.think = capturing_think
+            mock_thinker_cls.return_value = thinker_instance
+
+            await agent.autonomous_think()
+
+        thought_history = str(captured_kwargs.get("thought_history", ""))
+        assert "IMPORTANT" in thought_history
+        assert "ai" in thought_history.lower()
+        assert "MUST think about something completely different" in thought_history
+
+    @pytest.mark.asyncio
+    async def test_soft_nudge_at_two_repeats(self) -> None:
+        """When same topic appears 2 times, a soft nudge is added."""
+        agent = AgentCore()
+        agent._recent_topics = ["ai", "ai", "music"]
+
+        captured_kwargs: dict[str, object] = {}
+
+        mock_thought = MagicMock()
+        mock_thought.content = "Thinking"
+        mock_thought.metadata = {"topic": "poetry", "follow_up": ""}
+
+        async def capturing_think(**kwargs: object) -> tuple[MagicMock, str, float]:
+            captured_kwargs.update(kwargs)
+            return mock_thought, "curious", 0.5
+
+        with patch("clide.autonomy.thinker.Thinker") as mock_thinker_cls:
+            thinker_instance = MagicMock()
+            thinker_instance.think = capturing_think
+            mock_thinker_cls.return_value = thinker_instance
+
+            await agent.autonomous_think()
+
+        thought_history = str(captured_kwargs.get("thought_history", ""))
+        assert "Consider exploring a different topic" in thought_history
+
+    @pytest.mark.asyncio
+    async def test_no_diversity_instruction_with_varied_topics(self) -> None:
+        """No diversity instruction when topics are varied."""
+        agent = AgentCore()
+        agent._recent_topics = ["ai", "music", "food"]
+
+        captured_kwargs: dict[str, object] = {}
+
+        mock_thought = MagicMock()
+        mock_thought.content = "Thinking"
+        mock_thought.metadata = {"topic": "art", "follow_up": ""}
+
+        async def capturing_think(**kwargs: object) -> tuple[MagicMock, str, float]:
+            captured_kwargs.update(kwargs)
+            return mock_thought, "curious", 0.5
+
+        with patch("clide.autonomy.thinker.Thinker") as mock_thinker_cls:
+            thinker_instance = MagicMock()
+            thinker_instance.think = capturing_think
+            mock_thinker_cls.return_value = thinker_instance
+
+            await agent.autonomous_think()
+
+        thought_history = str(captured_kwargs.get("thought_history", ""))
+        assert "IMPORTANT" not in thought_history
+        assert "Consider exploring" not in thought_history

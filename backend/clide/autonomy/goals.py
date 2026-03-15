@@ -184,6 +184,49 @@ class GoalManager:
             return None
         return self._row_to_goal(row)
 
+    async def expire_stale(self, max_cycles: int = 20) -> list[Goal]:
+        """Mark goals as abandoned if they haven't been updated recently.
+
+        Uses updated_at timestamp — if a goal hasn't been touched in roughly
+        max_cycles * thinking_interval seconds, it's considered stale.
+        A default of 20 cycles at ~5min each gives ~2 hours.
+        """
+        await self._ensure_initialized()
+        from datetime import timedelta
+
+        cutoff = datetime.utcnow() - timedelta(hours=2)
+
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                """SELECT * FROM goals
+                   WHERE status = ? AND updated_at < ?""",
+                (GoalStatus.ACTIVE.value, cutoff.isoformat()),
+            )
+            rows = await cursor.fetchall()
+
+            expired: list[Goal] = []
+            for row in rows:
+                goal = self._row_to_goal(row)
+                await db.execute(
+                    """UPDATE goals SET status = ?, notes = ?, updated_at = ?
+                       WHERE id = ?""",
+                    (
+                        GoalStatus.ABANDONED.value,
+                        "Auto-expired: not updated in over 2 hours",
+                        datetime.utcnow().isoformat(),
+                        goal.id,
+                    ),
+                )
+                expired.append(goal)
+
+            await db.commit()
+
+        if expired:
+            logger.info("Auto-expired %d stale goal(s)", len(expired))
+
+        return expired
+
     @staticmethod
     def _row_to_goal(row: aiosqlite.Row) -> Goal:
         return Goal(

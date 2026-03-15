@@ -101,17 +101,21 @@ class Thinker:
             goal_instruction = (
                 "You have NO goals yet. You SHOULD create your first goal by "
                 "setting the new_goal field in your response. Pick something "
-                "you genuinely want to explore or achieve."
+                "specific and achievable within a few thinking cycles — not an "
+                "open-ended exploration. Good goals: 'Find 3 interesting facts about X', "
+                "'Form an opinion on Y', 'Compare approaches to Z'. "
+                "Bad goals: 'Explore consciousness', 'Understand emotions'."
             )
         elif max_goals > 0:
             goal_instruction = (
                 "You may propose a new goal, update progress on existing ones, "
-                "or mark goals as completed/abandoned."
+                "or mark goals as completed/abandoned. Goals should be specific "
+                "and completable — something you can finish within a few cycles."
             )
         else:
             goal_instruction = (
-                "You are at the maximum number of goals. Focus on progressing "
-                "or completing existing ones before creating new ones."
+                "You are at the maximum number of goals. Focus on completing "
+                "or abandoning existing ones before creating new ones."
             )
 
         prompt = THINKING_PROMPT.format(

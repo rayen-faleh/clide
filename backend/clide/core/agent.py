@@ -56,6 +56,8 @@ class AgentCore:
         self.born_at = born_at
         self.tool_registry = tool_registry
         self._tool_event_callback: Any = None  # Set by websocket handler
+        self._recent_topics: list[str] = []  # Track last N thought topics
+        self._topic_history_size = 6  # Remember last 6 topics
 
     @staticmethod
     def _format_age(dt: datetime) -> str:
@@ -533,6 +535,10 @@ class AgentCore:
             current_goal_count = 0
             if self.goal_manager:
                 with contextlib.suppress(Exception):
+                    # Expire stale goals first
+                    await self.goal_manager.expire_stale()
+
+                with contextlib.suppress(Exception):
                     active_goals = await self.goal_manager.get_active()
                     current_goal_count = len(active_goals)
                     if active_goals:
@@ -629,6 +635,39 @@ class AgentCore:
                 except Exception:
                     logger.warning("Thinking phase 1 tool exploration failed", exc_info=True)
 
+            # --- Build diversity instruction ---
+            diversity_instruction = ""
+            if len(self._recent_topics) >= 3:
+                # Check for tunnel vision: same topic 3+ times in last 6
+                from collections import Counter
+
+                topic_counts = Counter(self._recent_topics[-6:])
+                most_common_topic, count = topic_counts.most_common(1)[0]
+
+                if count >= 3:
+                    # Mandatory rotation: force a different topic
+                    diversity_instruction = (
+                        f"IMPORTANT: You have been thinking about '{most_common_topic}' "
+                        f"for {count} cycles in a row. You MUST think about something "
+                        f"completely different this time. Pick a new topic unrelated to "
+                        f"'{most_common_topic}'. Explore a different interest, goal, "
+                        f"or curiosity."
+                    )
+                    logger.info(
+                        "Diversity enforced: topic '%s' repeated %d times",
+                        most_common_topic,
+                        count,
+                    )
+                elif count >= 2:
+                    # Soft nudge: encourage variety
+                    diversity_instruction = (
+                        f"Note: You've been thinking about '{most_common_topic}' recently. "
+                        f"Consider exploring a different topic this time for variety."
+                    )
+
+            if diversity_instruction:
+                thought_history = f"{diversity_instruction}\n\n{thought_history}"
+
             # --- Phase 2: Generate thought (existing flow) ---
             max_goals = 5
             think_kwargs: dict[str, Any] = {
@@ -654,6 +693,13 @@ class AgentCore:
                         f"{tools_context}\n\nTool results from exploration:\n{tool_results_context}"
                     )
             thought, mood, intensity = await thinker.think(**think_kwargs)
+
+            # Track topic for diversity scoring
+            topic = thought.metadata.get("topic", "")
+            if topic:
+                self._recent_topics.append(topic.lower())
+                if len(self._recent_topics) > self._topic_history_size:
+                    self._recent_topics = self._recent_topics[-self._topic_history_size :]
 
             # Store tool usage in thought metadata
             if tool_results_context:
