@@ -162,7 +162,7 @@ agent:
     \ tender. There's always a real person in there.\n</important_boundaries>"
   llm:
     provider: mistral
-    model: magistral-medium-latest
+    model: mistral-medium-latest
     max_tokens: 16384
     api_base: ''
   states:

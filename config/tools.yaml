@@ -7,6 +7,20 @@ tools:
       SEARXNG_URL: "http://localhost:8888"
     enabled: true
     description: "Search the web using SearXNG"
+  - name: reddit
+    transport: stdio
+    command: uvx
+    args: ["mcp-server-reddit"]
+    env: []
+    enabled: true
+    description: "Interact with reddit"
+  - name: minecraft-mcp
+    transport: stdio
+    command: npx
+    args: ["npx", "-y", "github:yuniko-software/minecraft-mcp-server", "--host", "localhost", "--port", "25565", "--username", "Clide"]
+    env: []
+    enabled: false
+    description: "Interact with reddit"
   - name: smallville
     transport: stdio
     command: python
