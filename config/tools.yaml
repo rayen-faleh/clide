@@ -7,3 +7,12 @@ tools:
       SEARXNG_URL: "http://localhost:8888"
     enabled: true
     description: "Search the web using SearXNG"
+  - name: smallville
+    transport: stdio
+    command: python
+    args: ["-m", "clide.tools.smallville_mcp"]
+    env:
+      SMALLVILLE_URL: "http://localhost:8080"
+      CLIDE_AGENT_NAME: "Clide"
+    enabled: false
+    description: "Interact with the Smallville village simulation - observe, talk to villagers, explore"
