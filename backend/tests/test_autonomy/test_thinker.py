@@ -287,6 +287,57 @@ class TestThinker:
         assert updates[0]["description"] == "astronomy"
         assert updates[0]["progress"] == 0.5
 
+    async def test_think_with_tool_results(self, thinker: Thinker) -> None:
+        mock_response = '{"thought": "Tools helped.", "mood": "focused", "mood_intensity": 0.7}'
+        captured_messages: list[object] = []
+
+        async def fake_stream(
+            messages: object, *args: object, **kwargs: object
+        ) -> AsyncIterator[str]:
+            captured_messages.append(messages)
+            yield mock_response
+
+        with patch("clide.autonomy.thinker.stream_completion", side_effect=fake_stream):
+            await thinker.think(tool_results_context="Search returned 5 results about AI.")
+
+        prompt = captured_messages[0][0]["content"]  # type: ignore[index]
+        assert "Search returned 5 results about AI." in prompt
+        assert "Incorporate these results into your thinking." in prompt
+
+    async def test_think_without_tool_results(self, thinker: Thinker) -> None:
+        mock_response = '{"thought": "No tools.", "mood": "neutral", "mood_intensity": 0.4}'
+        captured_messages: list[object] = []
+
+        async def fake_stream(
+            messages: object, *args: object, **kwargs: object
+        ) -> AsyncIterator[str]:
+            captured_messages.append(messages)
+            yield mock_response
+
+        with patch("clide.autonomy.thinker.stream_completion", side_effect=fake_stream):
+            await thinker.think(tool_results_context="")
+
+        prompt = captured_messages[0][0]["content"]  # type: ignore[index]
+        assert "Tool results from your exploration" not in prompt
+        assert "Incorporate these results" not in prompt
+
+    async def test_think_tool_results_in_metadata(self, thinker: Thinker) -> None:
+        mock_response = '{"thought": "Using tools.", "mood": "focused", "mood_intensity": 0.6}'
+
+        async def fake_stream(*args: object, **kwargs: object) -> AsyncIterator[str]:
+            yield mock_response
+
+        with patch("clide.autonomy.thinker.stream_completion", side_effect=fake_stream):
+            thought, _, _ = await thinker.think(tool_results_context="Weather API returned sunny.")
+
+        assert thought.metadata["used_tools"] == "true"
+
+        # Also verify it's NOT set when no tool results
+        with patch("clide.autonomy.thinker.stream_completion", side_effect=fake_stream):
+            thought_no_tools, _, _ = await thinker.think(tool_results_context="")
+
+        assert "used_tools" not in thought_no_tools.metadata
+
     async def test_think_no_goals_in_response(self, thinker: Thinker) -> None:
         mock_response = '{"thought": "Just thinking.", "mood": "neutral", "mood_intensity": 0.4}'
 

@@ -34,6 +34,8 @@ disagree, wonder, speculate. This is your mind and yours alone.
 
 {tools_context}
 
+{tool_results_context}
+
 {thought_history}
 
 IMPORTANT: The thoughts listed above are your PREVIOUS thoughts. Do NOT repeat them. \
@@ -84,6 +86,7 @@ class Thinker:
         goals_context: str = "",
         opinions_context: str = "",
         tools_context: str = "",
+        tool_results_context: str = "",
         thought_history: str = "",
         system_prompt: str = "",
         max_goals: int = 5,
@@ -128,6 +131,12 @@ class Thinker:
             tools_context=(
                 f"Your available tools (usable during conversations):\n{tools_context}"
                 if tools_context
+                else ""
+            ),
+            tool_results_context=(
+                f"Tool results from your exploration:\n{tool_results_context}\n"
+                "Incorporate these results into your thinking."
+                if tool_results_context
                 else ""
             ),
             thought_history=(
@@ -178,5 +187,8 @@ class Thinker:
                 "goal_updates": json.dumps(goal_updates_raw),
             },
         )
+
+        if tool_results_context:
+            thought.metadata["used_tools"] = "true"
 
         return thought, mood, max(0.0, min(1.0, intensity))
