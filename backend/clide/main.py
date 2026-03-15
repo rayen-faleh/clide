@@ -13,6 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from clide.api.config_routes import config_router
 from clide.api.conversation_routes import conversation_router, set_conversation_store
+from clide.api.goal_routes import goal_router, set_goal_manager
 from clide.api.memory_routes import cost_router, memory_router, set_amem, set_cost_tracker
 from clide.api.routes import router
 from clide.api.websocket import set_agent_core, ws_router
@@ -126,6 +127,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     # Goal manager
     goal_manager = GoalManager()
     agent_core.goal_manager = goal_manager
+    set_goal_manager(goal_manager)
 
     # Autonomy scheduler
     scheduler = ThinkingScheduler(
@@ -210,6 +212,7 @@ def create_app() -> FastAPI:
     app.include_router(cost_router)
     app.include_router(config_router)
     app.include_router(conversation_router)
+    app.include_router(goal_router)
 
     return app
 

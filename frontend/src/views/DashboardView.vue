@@ -20,8 +20,22 @@ const { connect, on, off } = useWebSocket()
 
 const goals = ref<Goal[]>([])
 
+async function fetchGoals() {
+  try {
+    const res = await fetch('/api/goals/active')
+    if (res.ok) {
+      const data = await res.json()
+      goals.value = data.goals
+    }
+  } catch (e) {
+    console.error('Failed to load goals:', e)
+  }
+}
+
 function handleThought(msg: WSMessage) {
   agentStore.handleThought(msg)
+  // Refresh goals after each thought (goals may have been created/updated)
+  fetchGoals()
 }
 
 function handleMoodUpdate(msg: WSMessage) {
@@ -30,9 +44,12 @@ function handleMoodUpdate(msg: WSMessage) {
 
 function handleStateChange(msg: WSMessage) {
   agentStore.handleStateChange(msg)
+  // Refresh goals on state changes (thinking cycle may have modified goals)
+  fetchGoals()
 }
 
 onMounted(() => {
+  fetchGoals()
   on('thought', handleThought)
   on('mood_update', handleMoodUpdate)
   on('state_change', handleStateChange)
