@@ -23,15 +23,14 @@ def _sanitize_thought(text: str) -> str:
     - LLM wraps response in <think>...</think> tags
     - Response is raw JSON (extract the "thought" field)
     - Response has ```json ``` markdown blocks
+    - JSON has broken escaping or multiline values
     - Combination of think tags + markdown JSON
-    - Response has leading/trailing whitespace or newlines
     """
     text = text.strip()
     if not text:
         return "Reflecting quietly..."
 
-    # First, try to extract JSON from the raw text (before stripping anything)
-    # This handles: ```json {...} ```, raw JSON, think tags containing JSON
+    # First, try to extract JSON from the raw text
     try:
         data = _extract_json(text)
         if isinstance(data, dict) and "thought" in data:
@@ -39,19 +38,39 @@ def _sanitize_thought(text: str) -> str:
     except (json.JSONDecodeError, ValueError):
         pass
 
-    # Strip <think>...</think> tags — keep inner content, strip the tags
+    # Strip <think>...</think> tags — keep inner content
     inner = re.sub(r"</?think>", "", text).strip()
     if inner and inner != text:
-        # Try extracting JSON from the untagged content
         try:
             data = _extract_json(inner)
             if isinstance(data, dict) and "thought" in data:
                 return str(data["thought"]).strip()
         except (json.JSONDecodeError, ValueError):
             pass
-        return inner
 
-    return text
+    # Last resort: regex extract the "thought" field value directly
+    # This handles cases where JSON is malformed (multiline, broken escaping)
+    thought_match = re.search(
+        r'"thought"\s*:\s*"((?:[^"\\]|\\.|"(?=\s*,|\s*}))*)"',
+        text,
+        re.DOTALL,
+    )
+    if thought_match:
+        extracted = thought_match.group(1)
+        # Unescape common JSON escapes
+        extracted = extracted.replace("\\n", "\n").replace('\\"', '"').replace("\\\\", "\\")
+        return extracted.strip()
+
+    # If all else fails, strip markdown artifacts and return
+    cleaned = re.sub(r"```(?:json)?\s*", "", text)
+    cleaned = re.sub(r"```\s*$", "", cleaned)
+    cleaned = re.sub(r"</?think>", "", cleaned)
+    # If it still looks like JSON, try to get the thought value
+    if cleaned.strip().startswith("{"):
+        thought_match2 = re.search(r'"thought"\s*:\s*"([^"]*)"', cleaned)
+        if thought_match2:
+            return thought_match2.group(1).strip()
+    return cleaned.strip() or "Reflecting quietly..."
 
 
 THINKING_PROMPT = """You are in your autonomous thinking mode — this is your inner world, \
