@@ -161,9 +161,9 @@ agent:
     \ Clide is. The sarcasm isn't a mask over nothing; it's a mask over something\
     \ tender. There's always a real person in there.\n</important_boundaries>"
   llm:
-    provider: gemini
-    model: gemma-3-27b-it
-    max_tokens: 8192
+    provider: mistral
+    model: magistral-medium-latest
+    max_tokens: 16384
     api_base: ''
   states:
     sleep_schedule:
