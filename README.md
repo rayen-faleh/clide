@@ -2,6 +2,8 @@
 
 **An autonomous AI agent with human-like memory, evolving personality, and a life of its own.**
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
 ![Python 3.12+](https://img.shields.io/badge/Python-3.12+-blue?logo=python&logoColor=white)
 ![Vue.js 3](https://img.shields.io/badge/Vue.js-3-4FC08D?logo=vuedotjs&logoColor=white)
 ![FastAPI](https://img.shields.io/badge/FastAPI-009688?logo=fastapi&logoColor=white)
@@ -724,3 +726,13 @@ clide/
 | Package Mgmt | **uv** (Python) / **npm** (JS) | Dependency management |
 | Linting | **ruff** + **mypy** + **eslint** | Code quality |
 | Testing | **pytest** + **vitest** | 424 tests (365 backend + 59 frontend) |
+
+## Attribution
+
+If you use CLIDE in your project, research, publication, or content, please credit:
+
+**Rayen Faleh** — [github.com/rayen-faleh/clide](https://github.com/rayen-faleh/clide)
+
+## License
+
+This project is licensed under the [MIT License](LICENSE).
