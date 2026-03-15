@@ -175,7 +175,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
         agent_core.set_tool_event_callback(None)  # Clear after thinking
 
         if result:
-            thought_content, mood, intensity = result
+            thought_content, mood, intensity, thought_type = result
             # Late import to avoid circular imports
             from clide.api.schemas import (
                 MoodPayload,
@@ -193,6 +193,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
                     payload=ThoughtPayload(
                         content=thought_content,
                         source="autonomous",
+                        thought_type=thought_type,
                     ).model_dump(),
                 )
             )

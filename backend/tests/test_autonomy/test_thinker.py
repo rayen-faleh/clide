@@ -349,3 +349,87 @@ class TestThinker:
 
         assert thought.metadata["new_goal"] == ""
         assert thought.metadata["goal_updates"] == "[]"
+
+    async def test_think_with_mind_wandering_type(self, thinker: Thinker) -> None:
+        mock_response = '{"thought": "Random musing.", "mood": "playful", "mood_intensity": 0.4}'
+        captured_messages: list[object] = []
+
+        async def fake_stream(
+            messages: object, *args: object, **kwargs: object
+        ) -> AsyncIterator[str]:
+            captured_messages.append(messages)
+            yield mock_response
+
+        with patch("clide.autonomy.thinker.stream_completion", side_effect=fake_stream):
+            thought, mood, intensity = await thinker.think(thought_type="mind_wandering")
+
+        prompt = captured_messages[0][0]["content"]  # type: ignore[index]
+        assert "wandering" in prompt.lower()
+        assert thought.content == "Random musing."
+
+    async def test_think_with_self_reflection_type(self, thinker: Thinker) -> None:
+        mock_response = (
+            '{"thought": "Looking inward.", "mood": "contemplative", "mood_intensity": 0.6}'
+        )
+        captured_messages: list[object] = []
+
+        async def fake_stream(
+            messages: object, *args: object, **kwargs: object
+        ) -> AsyncIterator[str]:
+            captured_messages.append(messages)
+            yield mock_response
+
+        with patch("clide.autonomy.thinker.stream_completion", side_effect=fake_stream):
+            thought, mood, intensity = await thinker.think(thought_type="self_reflection")
+
+        prompt = captured_messages[0][0]["content"]  # type: ignore[index]
+        assert "reflect" in prompt.lower() or "self" in prompt.lower()
+
+    async def test_think_with_goal_oriented_type(self, thinker: Thinker) -> None:
+        mock_response = (
+            '{"thought": "Working on goals.", "mood": "focused", "mood_intensity": 0.8, '
+            '"topic": "goals", "follow_up": "next step", "new_goal": "", "goal_updates": []}'
+        )
+        captured_messages: list[object] = []
+
+        async def fake_stream(
+            messages: object, *args: object, **kwargs: object
+        ) -> AsyncIterator[str]:
+            captured_messages.append(messages)
+            yield mock_response
+
+        with patch("clide.autonomy.thinker.stream_completion", side_effect=fake_stream):
+            thought, mood, intensity = await thinker.think(thought_type="goal_oriented")
+
+        prompt = captured_messages[0][0]["content"]  # type: ignore[index]
+        assert "follow_up" in prompt
+        assert "new_goal" in prompt
+        assert "goal_updates" in prompt
+
+    async def test_think_minimal_json_for_non_goal(self, thinker: Thinker) -> None:
+        """Non-goal types should work with minimal JSON (no topic/follow_up/goals)."""
+        mock_response = '{"thought": "Just a thought.", "mood": "amused", "mood_intensity": 0.5}'
+
+        async def fake_stream(*args: object, **kwargs: object) -> AsyncIterator[str]:
+            yield mock_response
+
+        with patch("clide.autonomy.thinker.stream_completion", side_effect=fake_stream):
+            thought, mood, intensity = await thinker.think(thought_type="mind_wandering")
+
+        assert thought.content == "Just a thought."
+        assert mood == "amused"
+        assert intensity == 0.5
+        # Non-goal types should not have goal-related metadata
+        assert "new_goal" not in thought.metadata
+        assert "goal_updates" not in thought.metadata
+
+    async def test_thought_type_set_on_returned_thought(self, thinker: Thinker) -> None:
+        mock_response = '{"thought": "Observing.", "mood": "neutral", "mood_intensity": 0.3}'
+
+        async def fake_stream(*args: object, **kwargs: object) -> AsyncIterator[str]:
+            yield mock_response
+
+        with patch("clide.autonomy.thinker.stream_completion", side_effect=fake_stream):
+            thought, _, _ = await thinker.think(thought_type="observation")
+
+        assert thought.thought_type == "observation"

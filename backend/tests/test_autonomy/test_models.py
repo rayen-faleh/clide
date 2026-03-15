@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from clide.autonomy.models import Goal, GoalPriority, GoalStatus, Thought
+from clide.autonomy.models import Goal, GoalPriority, GoalStatus, Thought, ThoughtType
 
 
 class TestThought:
@@ -23,6 +23,23 @@ class TestThought:
     def test_thought_with_metadata(self) -> None:
         thought = Thought(id="t3", content="Meta", metadata={"key": "value"})
         assert thought.metadata == {"key": "value"}
+
+
+class TestThoughtType:
+    def test_thought_type_enum_values(self) -> None:
+        assert ThoughtType.MIND_WANDERING == "mind_wandering"
+        assert ThoughtType.SELF_REFLECTION == "self_reflection"
+        assert ThoughtType.SCENARIO_SIMULATION == "scenario_simulation"
+        assert ThoughtType.GOAL_ORIENTED == "goal_oriented"
+        assert ThoughtType.OBSERVATION == "observation"
+
+    def test_thought_has_thought_type_field(self) -> None:
+        thought = Thought(id="t-type", content="Testing type field")
+        assert hasattr(thought, "thought_type")
+
+    def test_thought_type_default(self) -> None:
+        thought = Thought(id="t-default", content="Default type")
+        assert thought.thought_type == ThoughtType.MIND_WANDERING
 
 
 class TestGoal:

@@ -62,6 +62,7 @@ class ThoughtPayload(BaseModel):
 
     content: str
     source: Literal["autonomous", "reactive"]
+    thought_type: str = "goal_oriented"
 
 
 class MoodPayload(BaseModel):

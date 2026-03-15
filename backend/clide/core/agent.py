@@ -7,11 +7,13 @@ import contextlib
 import inspect
 import json as json_mod
 import logging
+import random
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from clide.api.schemas import AgentState
+from clide.autonomy.models import ThoughtType
 from clide.core.llm import LLMConfig, complete_with_tools, stream_completion
 from clide.core.prompts import build_system_prompt
 from clide.core.state import StateMachine
@@ -25,6 +27,14 @@ if TYPE_CHECKING:
     from clide.tools.registry import ToolRegistry
 
 logger = logging.getLogger(__name__)
+
+THOUGHT_TYPE_WEIGHTS: dict[str, int] = {
+    ThoughtType.MIND_WANDERING: 40,
+    ThoughtType.SELF_REFLECTION: 25,
+    ThoughtType.SCENARIO_SIMULATION: 15,
+    ThoughtType.GOAL_ORIENTED: 15,
+    ThoughtType.OBSERVATION: 5,
+}
 
 
 class AgentCore:
@@ -474,13 +484,13 @@ class AgentCore:
             except Exception:
                 logger.warning("Failed to update goals", exc_info=True)
 
-    async def autonomous_think(self) -> tuple[str, str, float] | None:
+    async def autonomous_think(self) -> tuple[str, str, float, str] | None:
         """Run an autonomous thinking cycle.
 
         Gathers rich context (memories, personality, opinions, goals, thought
         history) and feeds it to the Thinker for a deep, autonomous reflection.
 
-        Returns (thought_content, mood, intensity) or None if thinking fails.
+        Returns (thought_content, mood, intensity, thought_type) or None if thinking fails.
         """
         from clide.autonomy.thinker import Thinker  # Import here to avoid circular
 
@@ -496,6 +506,14 @@ class AgentCore:
 
         try:
             thinker = Thinker(llm_config=self.llm_config)
+
+            # --- Select thought type ---
+            types = list(THOUGHT_TYPE_WEIGHTS.keys())
+            weights = list(THOUGHT_TYPE_WEIGHTS.values())
+            thought_type = random.choices(types, weights=weights, k=1)[0]
+            logger.info("Thought type selected: %s", thought_type)
+
+            is_goal_oriented = thought_type == ThoughtType.GOAL_ORIENTED
 
             # --- Gather recent conversation context ---
             recent_conversation_context = ""
@@ -562,145 +580,141 @@ class AgentCore:
             if self.character:
                 personality_context = self.character.build_personality_prompt()
 
-            # --- Gather goals context ---
+            # --- Heavy context: only for goal-oriented thoughts ---
             goals_context = ""
-            current_goal_count = 0
-            if self.goal_manager:
-                with contextlib.suppress(Exception):
-                    # Expire stale goals first
-                    await self.goal_manager.expire_stale()
-
-                with contextlib.suppress(Exception):
-                    active_goals = await self.goal_manager.get_active()
-                    current_goal_count = len(active_goals)
-                    if active_goals:
-                        goals_context = "\n".join(
-                            f"- {g.description} (progress: {g.progress:.0%},"
-                            f" created {self._format_age(g.created_at)})"
-                            for g in active_goals
-                        )
-                    else:
-                        goals_context = "(none yet - you can create your first goal!)"
-
-            # --- Gather opinions context ---
             opinions_context = ""
-            if self.character:
-                with contextlib.suppress(Exception):
-                    opinions = self.character.opinions.all()
-                    if opinions:
-                        opinions_context = "\n".join(
-                            f"- On {op.topic}: {op.stance}"
-                            f" (confidence: {op.confidence:.1f},"
-                            f" formed {self._format_age(op.formed_at)})"
-                            for op in sorted(
-                                opinions,
-                                key=lambda o: o.confidence,
-                                reverse=True,
-                            )[:5]
-                        )
-
-            # --- Gather thought history ---
             thought_history = ""
-            if self.amem:
-                with contextlib.suppress(Exception):
-                    # Get the 3 most recent thoughts directly from SQLite (guaranteed fresh)
-                    recent_thoughts = await self.amem.get_recent_by_type("thought", limit=3)
-                    recent_ids = [z.id for z in recent_thoughts]
-
-                    # Get 2 random memories for variety (exclude recent thoughts)
-                    random_memories = await self.amem.get_random(limit=2, exclude_ids=recent_ids)
-
-                    # Format with timestamps
-                    thought_parts: list[str] = []
-                    for z in recent_thoughts:
-                        thought_parts.append(
-                            f"- [Recent thought] {z.content[:200]}"
-                            f" [{self._format_age(z.created_at)}]"
-                        )
-                    for z in random_memories:
-                        thought_parts.append(
-                            f"- [Past memory] {z.summary or z.content[:100]}"
-                            f" [{self._format_age(z.created_at)}]"
-                        )
-
-                    thought_history = "\n".join(thought_parts)
-
-            # --- Gather tools context ---
             tools_context = ""
-            tool_defs: list[dict[str, Any]] = []
-            if self.tool_registry:
-                tool_defs = self.tool_registry.get_tool_definitions_for_llm()
-                if tool_defs:
-                    tools_context = "\n".join(
-                        f"- {t['function']['name']}: {t['function'].get('description', '')}"
-                        for t in tool_defs
-                    )
-
-            # --- Phase 1: Tool exploration (optional) ---
             tool_results_context = ""
-            if self.tool_registry and tool_defs:
-                tool_prompt = (
-                    "You are in your autonomous thinking mode. "
-                    "Based on your current thoughts, goals, and curiosity, "
-                    "would you like to use any of your available tools to learn something? "
-                    "If yes, call the appropriate tool. "
-                    "If no, just respond with a short message like "
-                    "'No tools needed right now.'\n\n"
-                    f"Your current focus: {topic_query}\n"
-                    f"Your goals: {goals_context}\n"
-                )
-                tool_messages: list[dict[str, Any]] = [
-                    {"role": "system", "content": self.system_prompt},
-                    {"role": "user", "content": tool_prompt},
-                ]
+            current_goal_count = 0
+            tool_defs: list[dict[str, Any]] = []
 
-                try:
-                    tool_response = await self._process_with_tools(tool_messages, tool_defs)
-                    if tool_response and "no tools" not in tool_response.lower():
-                        tool_results_context = tool_response
-                        logger.info(
-                            "Thinking phase 1: used tools, got %d chars of context",
-                            len(tool_response),
+            if is_goal_oriented:
+                # --- Gather goals context ---
+                if self.goal_manager:
+                    with contextlib.suppress(Exception):
+                        # Expire stale goals first
+                        await self.goal_manager.expire_stale()
+
+                    with contextlib.suppress(Exception):
+                        active_goals = await self.goal_manager.get_active()
+                        current_goal_count = len(active_goals)
+                        if active_goals:
+                            goals_context = "\n".join(
+                                f"- {g.description} (progress: {g.progress:.0%},"
+                                f" created {self._format_age(g.created_at)})"
+                                for g in active_goals
+                            )
+                        else:
+                            goals_context = "(none yet - you can create your first goal!)"
+
+                # --- Gather opinions context ---
+                if self.character:
+                    with contextlib.suppress(Exception):
+                        opinions = self.character.opinions.all()
+                        if opinions:
+                            opinions_context = "\n".join(
+                                f"- On {op.topic}: {op.stance}"
+                                f" (confidence: {op.confidence:.1f},"
+                                f" formed {self._format_age(op.formed_at)})"
+                                for op in sorted(
+                                    opinions,
+                                    key=lambda o: o.confidence,
+                                    reverse=True,
+                                )[:5]
+                            )
+
+                # --- Gather thought history ---
+                if self.amem:
+                    with contextlib.suppress(Exception):
+                        recent_thoughts = await self.amem.get_recent_by_type("thought", limit=3)
+                        recent_ids = [z.id for z in recent_thoughts]
+                        random_memories = await self.amem.get_random(
+                            limit=2, exclude_ids=recent_ids
                         )
-                    else:
-                        logger.debug("Thinking phase 1: no tools used")
-                except Exception:
-                    logger.warning("Thinking phase 1 tool exploration failed", exc_info=True)
+                        thought_parts: list[str] = []
+                        for z in recent_thoughts:
+                            thought_parts.append(
+                                f"- [Recent thought] {z.content[:200]}"
+                                f" [{self._format_age(z.created_at)}]"
+                            )
+                        for z in random_memories:
+                            thought_parts.append(
+                                f"- [Past memory] {z.summary or z.content[:100]}"
+                                f" [{self._format_age(z.created_at)}]"
+                            )
+                        thought_history = "\n".join(thought_parts)
 
-            # --- Build diversity instruction ---
-            diversity_instruction = ""
-            if len(self._recent_topics) >= 3:
-                # Check for tunnel vision: same topic 3+ times in last 6
-                from collections import Counter
+                # --- Gather tools context ---
+                if self.tool_registry:
+                    tool_defs = self.tool_registry.get_tool_definitions_for_llm()
+                    if tool_defs:
+                        tools_context = "\n".join(
+                            f"- {t['function']['name']}: {t['function'].get('description', '')}"
+                            for t in tool_defs
+                        )
 
-                topic_counts = Counter(self._recent_topics[-6:])
-                most_common_topic, count = topic_counts.most_common(1)[0]
-
-                if count >= 3:
-                    # Mandatory rotation: force a different topic
-                    diversity_instruction = (
-                        f"IMPORTANT: You have been thinking about '{most_common_topic}' "
-                        f"for {count} cycles in a row. You MUST think about something "
-                        f"completely different this time. Pick a new topic unrelated to "
-                        f"'{most_common_topic}'. Explore a different interest, goal, "
-                        f"or curiosity."
+                # --- Phase 1: Tool exploration (optional) ---
+                if self.tool_registry and tool_defs:
+                    tool_prompt = (
+                        "You are in your autonomous thinking mode. "
+                        "Based on your current thoughts, goals, and curiosity, "
+                        "would you like to use any of your available tools to learn something? "
+                        "If yes, call the appropriate tool. "
+                        "If no, just respond with a short message like "
+                        "'No tools needed right now.'\n\n"
+                        f"Your current focus: {topic_query}\n"
+                        f"Your goals: {goals_context}\n"
                     )
-                    logger.info(
-                        "Diversity enforced: topic '%s' repeated %d times",
-                        most_common_topic,
-                        count,
-                    )
-                elif count >= 2:
-                    # Soft nudge: encourage variety
-                    diversity_instruction = (
-                        f"Note: You've been thinking about '{most_common_topic}' recently. "
-                        f"Consider exploring a different topic this time for variety."
-                    )
+                    tool_messages: list[dict[str, Any]] = [
+                        {"role": "system", "content": self.system_prompt},
+                        {"role": "user", "content": tool_prompt},
+                    ]
 
-            if diversity_instruction:
-                thought_history = f"{diversity_instruction}\n\n{thought_history}"
+                    try:
+                        tool_response = await self._process_with_tools(tool_messages, tool_defs)
+                        if tool_response and "no tools" not in tool_response.lower():
+                            tool_results_context = tool_response
+                            logger.info(
+                                "Thinking phase 1: used tools, got %d chars of context",
+                                len(tool_response),
+                            )
+                        else:
+                            logger.debug("Thinking phase 1: no tools used")
+                    except Exception:
+                        logger.warning("Thinking phase 1 tool exploration failed", exc_info=True)
 
-            # --- Phase 2: Generate thought (existing flow) ---
+                # --- Build diversity instruction ---
+                diversity_instruction = ""
+                if len(self._recent_topics) >= 3:
+                    from collections import Counter
+
+                    topic_counts = Counter(self._recent_topics[-6:])
+                    most_common_topic, count = topic_counts.most_common(1)[0]
+
+                    if count >= 3:
+                        diversity_instruction = (
+                            f"IMPORTANT: You have been thinking about '{most_common_topic}' "
+                            f"for {count} cycles in a row. You MUST think about something "
+                            f"completely different this time. Pick a new topic unrelated to "
+                            f"'{most_common_topic}'. Explore a different interest, goal, "
+                            f"or curiosity."
+                        )
+                        logger.info(
+                            "Diversity enforced: topic '%s' repeated %d times",
+                            most_common_topic,
+                            count,
+                        )
+                    elif count >= 2:
+                        diversity_instruction = (
+                            f"Note: You've been thinking about '{most_common_topic}' recently. "
+                            f"Consider exploring a different topic this time for variety."
+                        )
+
+                if diversity_instruction:
+                    thought_history = f"{diversity_instruction}\n\n{thought_history}"
+
+            # --- Generate thought ---
             max_goals = 5
             think_kwargs: dict[str, Any] = {
                 "memory_context": memory_context,
@@ -713,21 +727,20 @@ class AgentCore:
                 "thought_history": thought_history,
                 "system_prompt": self.system_prompt,
                 "max_goals": max_goals if current_goal_count < max_goals else 0,
+                "thought_type": thought_type,
             }
             # Pass tool_results_context only if the thinker accepts it
-            # (added by another agent in parallel)
             if tool_results_context:
                 sig = inspect.signature(thinker.think)
                 if "tool_results_context" in sig.parameters:
                     think_kwargs["tool_results_context"] = tool_results_context
                 else:
-                    # Append to tools_context as fallback
                     think_kwargs["tools_context"] = (
                         f"{tools_context}\n\nTool results from exploration:\n{tool_results_context}"
                     )
             thought, mood, intensity = await thinker.think(**think_kwargs)
 
-            # Track topic for diversity scoring
+            # Track topic for diversity scoring (goal-oriented only)
             topic = thought.metadata.get("topic", "")
             if topic:
                 self._recent_topics.append(topic.lower())
@@ -739,15 +752,15 @@ class AgentCore:
                 thought.metadata["used_tools"] = "true"
                 thought.metadata["tool_results_preview"] = tool_results_context[:300]
 
-            # Handle goal creation/updates from thought metadata
-            if self.goal_manager:
+            # Handle goal creation/updates from thought metadata (goal-oriented only)
+            if is_goal_oriented and self.goal_manager:
                 await self._process_thought_goals(thought)
 
             # Fire-and-forget: store thought and update character in background
             asyncio.create_task(self._post_thought_tasks(thought, mood, intensity))
 
-            logger.info("Thought generated: %s", thought.content[:100])
-            return thought.content, mood, intensity
+            logger.info("Thought generated (%s): %s", thought_type, thought.content[:100])
+            return thought.content, mood, intensity, thought.thought_type
 
         except Exception:
             logger.exception("Autonomous thinking failed")

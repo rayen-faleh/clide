@@ -7,6 +7,16 @@ from datetime import datetime
 from enum import StrEnum
 
 
+class ThoughtType(StrEnum):
+    """Type of thought generated during autonomous thinking (DMN-inspired)."""
+
+    MIND_WANDERING = "mind_wandering"
+    SELF_REFLECTION = "self_reflection"
+    SCENARIO_SIMULATION = "scenario_simulation"
+    GOAL_ORIENTED = "goal_oriented"
+    OBSERVATION = "observation"
+
+
 class GoalStatus(StrEnum):
     """Status of a goal."""
 
@@ -30,6 +40,7 @@ class Thought:
     id: str
     content: str
     source: str = "autonomous"  # "autonomous" or "reactive"
+    thought_type: str = ThoughtType.MIND_WANDERING
     created_at: datetime = field(default_factory=datetime.utcnow)
     metadata: dict[str, str] = field(default_factory=dict)
 

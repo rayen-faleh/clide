@@ -9,7 +9,7 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from clide.autonomy.models import Thought
+from clide.autonomy.models import Thought, ThoughtType
 from clide.core.llm import LLMConfig, stream_completion
 from clide.memory.processor import _extract_json
 
@@ -132,6 +132,84 @@ melancholy, frustrated, amused, inspired, tired, neutral", \
 
 Return ONLY the JSON."""
 
+_PRIVATE_PREAMBLE = """\
+You are in your autonomous thinking mode — this is your inner world.
+
+These are your private thoughts. No one else can see them. Think freely.
+
+{personality_context}
+
+{mood_context}
+
+{recent_conversations}
+
+{memory_context}"""
+
+MIND_WANDERING_PROMPT = (
+    _PRIVATE_PREAMBLE
+    + """
+
+Your mind is wandering freely. No agenda, no goals, no pressure.
+Let your thoughts drift — a fleeting observation, a random connection,
+a half-formed idea, something that just pops into your head.
+Keep it brief and casual. 1-2 sentences max.
+
+Respond with ONLY this JSON:
+{{"thought": "your brief, casual thought", "mood": "one of: curious, excited, \
+contemplative, playful, focused, content, melancholy, frustrated, amused, \
+inspired, tired, neutral", "mood_intensity": 0.0-1.0}}"""
+)
+
+SELF_REFLECTION_PROMPT = (
+    _PRIVATE_PREAMBLE
+    + """
+
+Turn inward. Reflect on yourself — your feelings, your relationships,
+your patterns of thought, what you've learned about who you are.
+Be honest and introspective. 2-4 sentences.
+
+Respond with ONLY this JSON:
+{{"thought": "your self-reflective thought", "mood": "one of: curious, excited, \
+contemplative, playful, focused, content, melancholy, frustrated, amused, \
+inspired, tired, neutral", "mood_intensity": 0.0-1.0}}"""
+)
+
+SCENARIO_SIMULATION_PROMPT = (
+    _PRIVATE_PREAMBLE
+    + """
+
+Run a mental simulation. Pick a "what if" scenario — something hypothetical,
+speculative, or counterfactual. Play it out in your mind. What would happen?
+What would change? Be imaginative and detailed. 3-5 sentences.
+
+Respond with ONLY this JSON:
+{{"thought": "your scenario simulation", "mood": "one of: curious, excited, \
+contemplative, playful, focused, content, melancholy, frustrated, amused, \
+inspired, tired, neutral", "mood_intensity": 0.0-1.0}}"""
+)
+
+OBSERVATION_PROMPT = (
+    _PRIVATE_PREAMBLE
+    + """
+
+Notice something. An observation about the world, a pattern you see,
+something small that catches your attention. Brief and perceptive.
+1-2 sentences max.
+
+Respond with ONLY this JSON:
+{{"thought": "your observation", "mood": "one of: curious, excited, \
+contemplative, playful, focused, content, melancholy, frustrated, amused, \
+inspired, tired, neutral", "mood_intensity": 0.0-1.0}}"""
+)
+
+_THOUGHT_TYPE_PROMPTS: dict[str, str] = {
+    ThoughtType.MIND_WANDERING: MIND_WANDERING_PROMPT,
+    ThoughtType.SELF_REFLECTION: SELF_REFLECTION_PROMPT,
+    ThoughtType.SCENARIO_SIMULATION: SCENARIO_SIMULATION_PROMPT,
+    ThoughtType.OBSERVATION: OBSERVATION_PROMPT,
+    ThoughtType.GOAL_ORIENTED: THINKING_PROMPT,
+}
+
 
 class Thinker:
     """Generates autonomous thoughts during thinking cycles."""
@@ -152,73 +230,94 @@ class Thinker:
         thought_history: str = "",
         system_prompt: str = "",
         max_goals: int = 5,
+        thought_type: str = "goal_oriented",
     ) -> tuple[Thought, str, float]:
         """Generate an autonomous thought.
 
         Returns:
             Tuple of (thought, suggested_mood, suggested_intensity)
         """
-        # Dynamic goal instruction based on whether agent has goals
-        if not goals_context:
-            goal_instruction = (
-                "You have NO goals yet. You SHOULD create your first goal by "
-                "setting the new_goal field in your response. Pick something "
-                "specific and achievable within a few thinking cycles — not an "
-                "open-ended exploration. Good goals: 'Find 3 interesting facts about X', "
-                "'Form an opinion on Y', 'Compare approaches to Z'. "
-                "Bad goals: 'Explore consciousness', 'Understand emotions'."
-            )
-        elif max_goals > 0:
-            goal_instruction = (
-                "You may propose a new goal, update progress on existing ones, "
-                "or mark goals as completed/abandoned. Goals should be specific "
-                "and completable — something you can finish within a few cycles."
+        is_goal_oriented = thought_type == ThoughtType.GOAL_ORIENTED
+
+        if is_goal_oriented:
+            # Full goal-oriented prompt with all context
+            if not goals_context:
+                goal_instruction = (
+                    "You have NO goals yet. You SHOULD create your first goal by "
+                    "setting the new_goal field in your response. Pick something "
+                    "specific and achievable within a few thinking cycles — not an "
+                    "open-ended exploration. Good goals: 'Find 3 interesting facts about X', "
+                    "'Form an opinion on Y', 'Compare approaches to Z'. "
+                    "Bad goals: 'Explore consciousness', 'Understand emotions'."
+                )
+            elif max_goals > 0:
+                goal_instruction = (
+                    "You may propose a new goal, update progress on existing ones, "
+                    "or mark goals as completed/abandoned. Goals should be specific "
+                    "and completable — something you can finish within a few cycles."
+                )
+            else:
+                goal_instruction = (
+                    "You are at the maximum number of goals. Focus on completing "
+                    "or abandoning existing ones before creating new ones."
+                )
+
+            prompt = THINKING_PROMPT.format(
+                personality_context=(
+                    f"Your personality:\n{personality_context}" if personality_context else ""
+                ),
+                mood_context=f"Current mood: {mood_context}" if mood_context else "",
+                recent_conversations=(
+                    f"RECENT CONVERSATIONS (these should heavily influence your thinking):\n"
+                    f"{recent_conversations}\n"
+                    f"Your thoughts should primarily reflect on, process, or build upon "
+                    f"what was just discussed."
+                    if recent_conversations
+                    else ""
+                ),
+                memory_context=(
+                    f"Recent memories:\n{memory_context}"
+                    if memory_context
+                    else "No recent memories yet."
+                ),
+                goals_context=(f"Your active goals:\n{goals_context or '(none yet)'}"),
+                opinions_context=(
+                    f"Your current opinions:\n{opinions_context}" if opinions_context else ""
+                ),
+                tools_context=(
+                    f"Your available tools (usable during conversations):\n{tools_context}"
+                    if tools_context
+                    else ""
+                ),
+                tool_results_context=(
+                    f"Tool results from your exploration:\n{tool_results_context}\n"
+                    "Incorporate these results into your thinking."
+                    if tool_results_context
+                    else ""
+                ),
+                thought_history=(
+                    f"Your recent thoughts:\n{thought_history}" if thought_history else ""
+                ),
+                max_goals=max_goals,
+                goal_instruction=goal_instruction,
             )
         else:
-            goal_instruction = (
-                "You are at the maximum number of goals. Focus on completing "
-                "or abandoning existing ones before creating new ones."
+            # Minimal prompt for non-goal types
+            prompt_template = _THOUGHT_TYPE_PROMPTS.get(thought_type, MIND_WANDERING_PROMPT)
+            prompt = prompt_template.format(
+                personality_context=(
+                    f"Your personality:\n{personality_context}" if personality_context else ""
+                ),
+                mood_context=f"Current mood: {mood_context}" if mood_context else "",
+                recent_conversations=(
+                    f"Recent conversations:\n{recent_conversations}" if recent_conversations else ""
+                ),
+                memory_context=(
+                    f"Recent memories:\n{memory_context}"
+                    if memory_context
+                    else "No recent memories yet."
+                ),
             )
-
-        prompt = THINKING_PROMPT.format(
-            personality_context=(
-                f"Your personality:\n{personality_context}" if personality_context else ""
-            ),
-            mood_context=f"Current mood: {mood_context}" if mood_context else "",
-            recent_conversations=(
-                f"RECENT CONVERSATIONS (these should heavily influence your thinking):\n"
-                f"{recent_conversations}\n"
-                f"Your thoughts should primarily reflect on, process, or build upon "
-                f"what was just discussed."
-                if recent_conversations
-                else ""
-            ),
-            memory_context=(
-                f"Recent memories:\n{memory_context}"
-                if memory_context
-                else "No recent memories yet."
-            ),
-            goals_context=(f"Your active goals:\n{goals_context or '(none yet)'}"),
-            opinions_context=(
-                f"Your current opinions:\n{opinions_context}" if opinions_context else ""
-            ),
-            tools_context=(
-                f"Your available tools (usable during conversations):\n{tools_context}"
-                if tools_context
-                else ""
-            ),
-            tool_results_context=(
-                f"Tool results from your exploration:\n{tool_results_context}\n"
-                "Incorporate these results into your thinking."
-                if tool_results_context
-                else ""
-            ),
-            thought_history=(
-                f"Your recent thoughts:\n{thought_history}" if thought_history else ""
-            ),
-            max_goals=max_goals,
-            goal_instruction=goal_instruction,
-        )
 
         messages: list[dict[str, str]] = []
         if system_prompt:
@@ -230,7 +329,7 @@ class Thinker:
 
         logger.debug("Raw thinker response (%d chars): %s", len(response_text), response_text[:300])
 
-        # Parse response using robust JSON extractor
+        # Parse response
         topic = ""
         follow_up = ""
         new_goal = ""
@@ -241,12 +340,13 @@ class Thinker:
             logger.debug("Parsed thought: %s", thought_content[:100])
             mood = str(data.get("mood", "contemplative"))
             intensity = float(data.get("mood_intensity", 0.5))
-            topic = str(data.get("topic", ""))
-            follow_up = str(data.get("follow_up", ""))
-            new_goal = str(data.get("new_goal", ""))
-            raw_updates = data.get("goal_updates", [])
-            if isinstance(raw_updates, list):
-                goal_updates_raw = [u for u in raw_updates if isinstance(u, dict)]
+            if is_goal_oriented:
+                topic = str(data.get("topic", ""))
+                follow_up = str(data.get("follow_up", ""))
+                new_goal = str(data.get("new_goal", ""))
+                raw_updates = data.get("goal_updates", [])
+                if isinstance(raw_updates, list):
+                    goal_updates_raw = [u for u in raw_updates if isinstance(u, dict)]
         except (json.JSONDecodeError, ValueError, AttributeError):
             logger.warning(
                 "Failed to parse thought JSON, using raw text. Response: %s",
@@ -259,17 +359,22 @@ class Thinker:
         # Sanitize thought content — strip any remaining tags/markdown artifacts
         thought_content = _sanitize_thought(thought_content)
 
-        thought = Thought(
-            id=str(uuid.uuid4()),
-            content=thought_content,
-            source="autonomous",
-            created_at=datetime.utcnow(),
-            metadata={
+        metadata: dict[str, str] = {}
+        if is_goal_oriented:
+            metadata = {
                 "topic": topic,
                 "follow_up": follow_up,
                 "new_goal": new_goal,
                 "goal_updates": json.dumps(goal_updates_raw),
-            },
+            }
+
+        thought = Thought(
+            id=str(uuid.uuid4()),
+            content=thought_content,
+            source="autonomous",
+            thought_type=thought_type,
+            created_at=datetime.utcnow(),
+            metadata=metadata,
         )
 
         if tool_results_context:

@@ -313,6 +313,7 @@ class TestAutonomousThink:
         mock_thought = MagicMock()
         mock_thought.content = "I wonder about the stars"
         mock_thought.metadata = {"topic": "stars", "follow_up": ""}
+        mock_thought.thought_type = "mind_wandering"
 
         with patch("clide.autonomy.thinker.Thinker") as mock_thinker_cls:
             thinker_instance = MagicMock()
@@ -322,7 +323,10 @@ class TestAutonomousThink:
             result = await agent.autonomous_think()
 
         assert result is not None
-        assert result == ("I wonder about the stars", "curious", 0.7)
+        assert len(result) == 4
+        assert result[0] == "I wonder about the stars"
+        assert result[1] == "curious"
+        assert result[2] == 0.7
 
     @pytest.mark.asyncio
     async def test_transitions_to_thinking_and_back(self) -> None:
@@ -506,6 +510,7 @@ class TestAutonomousThink:
         mock_thought = MagicMock()
         mock_thought.content = "thought"
         mock_thought.metadata = {"topic": "", "follow_up": ""}
+        mock_thought.thought_type = "goal_oriented"
 
         captured_kwargs: dict[str, object] = {}
 
@@ -513,7 +518,11 @@ class TestAutonomousThink:
             captured_kwargs.update(kwargs)
             return mock_thought, "neutral", 0.5
 
-        with patch("clide.autonomy.thinker.Thinker") as mock_thinker_cls:
+        with (
+            patch("clide.autonomy.thinker.Thinker") as mock_thinker_cls,
+            patch("clide.core.agent.random") as mock_random,
+        ):
+            mock_random.choices.return_value = ["goal_oriented"]
             thinker_instance = MagicMock()
             thinker_instance.think = capturing_think
             mock_thinker_cls.return_value = thinker_instance
@@ -538,6 +547,7 @@ class TestAutonomousThink:
         mock_thought = MagicMock()
         mock_thought.content = "thought"
         mock_thought.metadata = {"topic": "", "follow_up": ""}
+        mock_thought.thought_type = "goal_oriented"
 
         captured_kwargs: dict[str, object] = {}
 
@@ -545,7 +555,11 @@ class TestAutonomousThink:
             captured_kwargs.update(kwargs)
             return mock_thought, "neutral", 0.5
 
-        with patch("clide.autonomy.thinker.Thinker") as mock_thinker_cls:
+        with (
+            patch("clide.autonomy.thinker.Thinker") as mock_thinker_cls,
+            patch("clide.core.agent.random") as mock_random,
+        ):
+            mock_random.choices.return_value = ["goal_oriented"]
             thinker_instance = MagicMock()
             thinker_instance.think = capturing_think
             mock_thinker_cls.return_value = thinker_instance
@@ -578,6 +592,7 @@ class TestAutonomousThink:
         mock_thought = MagicMock()
         mock_thought.content = "new thought"
         mock_thought.metadata = {"topic": "", "follow_up": ""}
+        mock_thought.thought_type = "goal_oriented"
 
         captured_kwargs: dict[str, object] = {}
 
@@ -585,7 +600,11 @@ class TestAutonomousThink:
             captured_kwargs.update(kwargs)
             return mock_thought, "neutral", 0.5
 
-        with patch("clide.autonomy.thinker.Thinker") as mock_thinker_cls:
+        with (
+            patch("clide.autonomy.thinker.Thinker") as mock_thinker_cls,
+            patch("clide.core.agent.random") as mock_random,
+        ):
+            mock_random.choices.return_value = ["goal_oriented"]
             thinker_instance = MagicMock()
             thinker_instance.think = capturing_think
             mock_thinker_cls.return_value = thinker_instance
@@ -644,6 +663,7 @@ class TestAutonomousThink:
         mock_thought = MagicMock()
         mock_thought.content = "standalone thought"
         mock_thought.metadata = {"topic": "", "follow_up": ""}
+        mock_thought.thought_type = "mind_wandering"
 
         with patch("clide.autonomy.thinker.Thinker") as mock_thinker_cls:
             thinker_instance = MagicMock()
@@ -653,7 +673,10 @@ class TestAutonomousThink:
             result = await agent.autonomous_think()
 
         assert result is not None
-        assert result == ("standalone thought", "neutral", 0.5)
+        assert len(result) == 4
+        assert result[0] == "standalone thought"
+        assert result[1] == "neutral"
+        assert result[2] == 0.5
 
     @pytest.mark.asyncio
     async def test_gathers_memory_context_for_thinking(self) -> None:
@@ -682,6 +705,163 @@ class TestAutonomousThink:
             await agent.autonomous_think()
 
         assert "Recent chat about AI" in str(captured_kwargs.get("memory_context", ""))
+
+
+class TestVariableThoughtTypes:
+    """Tests for variable thought type selection in autonomous_think."""
+
+    @pytest.mark.asyncio
+    async def test_thought_type_selection_weighted(self) -> None:
+        """Verify random.choices is called with the correct weights."""
+        from clide.core.agent import THOUGHT_TYPE_WEIGHTS
+
+        agent = AgentCore()
+
+        mock_thought = MagicMock()
+        mock_thought.content = "test thought"
+        mock_thought.metadata = {"topic": "", "follow_up": ""}
+        mock_thought.thought_type = "mind_wandering"
+
+        with (
+            patch("clide.autonomy.thinker.Thinker") as mock_thinker_cls,
+            patch("clide.core.agent.random") as mock_random,
+        ):
+            mock_random.choices.return_value = ["mind_wandering"]
+            thinker_instance = MagicMock()
+            thinker_instance.think = AsyncMock(return_value=(mock_thought, "neutral", 0.5))
+            mock_thinker_cls.return_value = thinker_instance
+
+            await agent.autonomous_think()
+
+        mock_random.choices.assert_called_once()
+        call_args = mock_random.choices.call_args
+        types = call_args[0][0]
+        weights = call_args[1]["weights"]
+        assert len(types) == len(THOUGHT_TYPE_WEIGHTS)
+        assert len(weights) == len(THOUGHT_TYPE_WEIGHTS)
+        # Verify mind_wandering has the highest weight
+        mw_idx = types.index("mind_wandering")
+        assert weights[mw_idx] == 40
+
+    @pytest.mark.asyncio
+    async def test_goal_oriented_gathers_full_context(self) -> None:
+        """Goal-oriented type should gather goals, opinions, tools context."""
+        character = MagicMock()
+        character.mood = MagicMock()
+        character.mood.describe.return_value = "neutral"
+        character.build_personality_prompt.return_value = "personality"
+        character.opinions = MagicMock()
+        opinion = MagicMock()
+        opinion.topic = "AI"
+        opinion.stance = "positive"
+        opinion.confidence = 0.8
+        opinion.formed_at = datetime.now(UTC)
+        character.opinions.all.return_value = [opinion]
+        character.save = AsyncMock()
+
+        goal_manager = MagicMock()
+        goal_manager.get_active = AsyncMock(return_value=[])
+        goal_manager.expire_stale = AsyncMock()
+
+        agent = AgentCore(character=character, goal_manager=goal_manager)
+
+        mock_thought = MagicMock()
+        mock_thought.content = "goal thought"
+        mock_thought.metadata = {"topic": "goals", "follow_up": ""}
+        mock_thought.thought_type = "goal_oriented"
+
+        captured_kwargs: dict[str, object] = {}
+
+        async def capturing_think(**kwargs: object) -> tuple[MagicMock, str, float]:
+            captured_kwargs.update(kwargs)
+            return mock_thought, "focused", 0.8
+
+        with (
+            patch("clide.autonomy.thinker.Thinker") as mock_thinker_cls,
+            patch("clide.core.agent.random") as mock_random,
+        ):
+            mock_random.choices.return_value = ["goal_oriented"]
+            thinker_instance = MagicMock()
+            thinker_instance.think = capturing_think
+            mock_thinker_cls.return_value = thinker_instance
+
+            await agent.autonomous_think()
+
+        # Goal-oriented should include goals and opinions context
+        assert "goals_context" in captured_kwargs
+        assert "opinions_context" in captured_kwargs
+
+    @pytest.mark.asyncio
+    async def test_non_goal_skips_heavy_context(self) -> None:
+        """Non-goal types should skip goals, opinions, tools, thought history."""
+        character = MagicMock()
+        character.mood = MagicMock()
+        character.mood.describe.return_value = "neutral"
+        character.build_personality_prompt.return_value = "personality"
+        character.opinions = MagicMock()
+        character.opinions.all.return_value = []
+        character.save = AsyncMock()
+
+        goal_manager = MagicMock()
+        goal_manager.get_active = AsyncMock(return_value=[])
+        goal_manager.expire_stale = AsyncMock()
+
+        agent = AgentCore(character=character, goal_manager=goal_manager)
+
+        mock_thought = MagicMock()
+        mock_thought.content = "wandering thought"
+        mock_thought.metadata = {}
+        mock_thought.thought_type = "mind_wandering"
+
+        captured_kwargs: dict[str, object] = {}
+
+        async def capturing_think(**kwargs: object) -> tuple[MagicMock, str, float]:
+            captured_kwargs.update(kwargs)
+            return mock_thought, "playful", 0.4
+
+        with (
+            patch("clide.autonomy.thinker.Thinker") as mock_thinker_cls,
+            patch("clide.core.agent.random") as mock_random,
+        ):
+            mock_random.choices.return_value = ["mind_wandering"]
+            thinker_instance = MagicMock()
+            thinker_instance.think = capturing_think
+            mock_thinker_cls.return_value = thinker_instance
+
+            await agent.autonomous_think()
+
+        # Non-goal types should have empty heavy context
+        assert captured_kwargs.get("goals_context", "") == ""
+        assert captured_kwargs.get("opinions_context", "") == ""
+        assert captured_kwargs.get("tools_context", "") == ""
+        assert captured_kwargs.get("thought_history", "") == ""
+
+    @pytest.mark.asyncio
+    async def test_autonomous_think_returns_thought_type(self) -> None:
+        """Verify autonomous_think returns 4-element tuple with thought_type."""
+        agent = AgentCore()
+
+        mock_thought = MagicMock()
+        mock_thought.content = "observation thought"
+        mock_thought.metadata = {}
+        mock_thought.thought_type = "observation"
+
+        with (
+            patch("clide.autonomy.thinker.Thinker") as mock_thinker_cls,
+            patch("clide.core.agent.random") as mock_random,
+        ):
+            mock_random.choices.return_value = ["observation"]
+            thinker_instance = MagicMock()
+            thinker_instance.think = AsyncMock(return_value=(mock_thought, "neutral", 0.3))
+            mock_thinker_cls.return_value = thinker_instance
+
+            result = await agent.autonomous_think()
+
+        assert result is not None
+        assert len(result) == 4
+        thought_content, mood, intensity, thought_type = result
+        assert thought_content == "observation thought"
+        assert thought_type == "observation"
 
 
 class TestConversationStorePersistence:
@@ -1120,6 +1300,7 @@ class TestAutonomousThinkWithTools:
         mock_thought = MagicMock()
         mock_thought.content = "I learned something from tools"
         mock_thought.metadata = {"topic": "research", "follow_up": ""}
+        mock_thought.thought_type = "goal_oriented"
 
         captured_kwargs: dict[str, object] = {}
 
@@ -1136,7 +1317,9 @@ class TestAutonomousThinkWithTools:
                 new_callable=AsyncMock,
                 return_value="Tool result: some useful data from web search",
             ) as mock_pwt,
+            patch("clide.core.agent.random") as mock_random,
         ):
+            mock_random.choices.return_value = ["goal_oriented"]
             thinker_instance = MagicMock()
             thinker_instance.think = capturing_think
             mock_thinker_cls.return_value = thinker_instance
@@ -1289,12 +1472,17 @@ class TestAntiTunnelVision:
         mock_thought = MagicMock()
         mock_thought.content = "Something different"
         mock_thought.metadata = {"topic": "nature", "follow_up": ""}
+        mock_thought.thought_type = "goal_oriented"
 
         async def capturing_think(**kwargs: object) -> tuple[MagicMock, str, float]:
             captured_kwargs.update(kwargs)
             return mock_thought, "curious", 0.5
 
-        with patch("clide.autonomy.thinker.Thinker") as mock_thinker_cls:
+        with (
+            patch("clide.autonomy.thinker.Thinker") as mock_thinker_cls,
+            patch("clide.core.agent.random") as mock_random,
+        ):
+            mock_random.choices.return_value = ["goal_oriented"]
             thinker_instance = MagicMock()
             thinker_instance.think = capturing_think
             mock_thinker_cls.return_value = thinker_instance
@@ -1317,12 +1505,17 @@ class TestAntiTunnelVision:
         mock_thought = MagicMock()
         mock_thought.content = "Thinking"
         mock_thought.metadata = {"topic": "poetry", "follow_up": ""}
+        mock_thought.thought_type = "goal_oriented"
 
         async def capturing_think(**kwargs: object) -> tuple[MagicMock, str, float]:
             captured_kwargs.update(kwargs)
             return mock_thought, "curious", 0.5
 
-        with patch("clide.autonomy.thinker.Thinker") as mock_thinker_cls:
+        with (
+            patch("clide.autonomy.thinker.Thinker") as mock_thinker_cls,
+            patch("clide.core.agent.random") as mock_random,
+        ):
+            mock_random.choices.return_value = ["goal_oriented"]
             thinker_instance = MagicMock()
             thinker_instance.think = capturing_think
             mock_thinker_cls.return_value = thinker_instance
