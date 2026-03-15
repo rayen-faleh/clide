@@ -48,11 +48,21 @@ function handleStateChange(msg: WSMessage) {
   fetchGoals()
 }
 
+function handleThinkingToolCall(msg: WSMessage) {
+  agentStore.handleThinkingToolCall(msg)
+}
+
+function handleThinkingToolResult(msg: WSMessage) {
+  agentStore.handleThinkingToolResult(msg)
+}
+
 onMounted(() => {
   fetchGoals()
   on('thought', handleThought)
   on('mood_update', handleMoodUpdate)
   on('state_change', handleStateChange)
+  on('tool_call', handleThinkingToolCall)
+  on('tool_result', handleThinkingToolResult)
   connect()
 })
 
@@ -60,6 +70,8 @@ onUnmounted(() => {
   off('thought', handleThought)
   off('mood_update', handleMoodUpdate)
   off('state_change', handleStateChange)
+  off('tool_call', handleThinkingToolCall)
+  off('tool_result', handleThinkingToolResult)
 })
 </script>
 
