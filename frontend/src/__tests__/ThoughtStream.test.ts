@@ -102,4 +102,54 @@ describe('ThoughtStream', () => {
 
     expect(wrapper.find('.tool-badge').exists()).toBe(false)
   })
+
+  it('renders thought type badge when thoughtType is present', () => {
+    const thoughts = [createThought({ content: 'Typed thought', thoughtType: 'self_reflection' })]
+    const wrapper = mount(ThoughtStream, {
+      props: { thoughts },
+    })
+
+    expect(wrapper.find('.thought-type-badge').exists()).toBe(true)
+  })
+
+  it('renders correct label for mind_wandering', () => {
+    const thoughts = [createThought({ content: 'Wandering', thoughtType: 'mind_wandering' })]
+    const wrapper = mount(ThoughtStream, {
+      props: { thoughts },
+    })
+
+    const badge = wrapper.find('.thought-type-badge')
+    expect(badge.text()).toBe('wandering')
+  })
+
+  it('renders correct label for goal_oriented', () => {
+    const thoughts = [createThought({ content: 'Goal thought', thoughtType: 'goal_oriented' })]
+    const wrapper = mount(ThoughtStream, {
+      props: { thoughts },
+    })
+
+    const badge = wrapper.find('.thought-type-badge')
+    expect(badge.text()).toBe('goal')
+  })
+
+  it('does not render thought type badge when thoughtType is undefined', () => {
+    const thoughts = [createThought({ content: 'No type' })]
+    const wrapper = mount(ThoughtStream, {
+      props: { thoughts },
+    })
+
+    expect(wrapper.find('.thought-type-badge').exists()).toBe(false)
+  })
+
+  it('badge has correct CSS class for type', () => {
+    const thoughts = [
+      createThought({ content: 'Scenario thought', thoughtType: 'scenario_simulation' }),
+    ]
+    const wrapper = mount(ThoughtStream, {
+      props: { thoughts },
+    })
+
+    const badge = wrapper.find('.thought-type-badge')
+    expect(badge.classes()).toContain('type-scenario_simulation')
+  })
 })
