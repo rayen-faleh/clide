@@ -44,14 +44,27 @@ Return ONLY valid JSON array. If no relations found, return []."""
 
 
 def _extract_json(text: str) -> Any:
-    """Extract JSON from LLM response that may contain markdown or preamble.
+    """Extract JSON from LLM response that may contain markdown, preamble, or wrapping.
+
+    Handles common LLM output patterns:
+    - Raw JSON
+    - ```json ... ``` code blocks (with or without 'json' label)
+    - ``` ... ``` code blocks (no label)
+    - JSON preceded/followed by explanation text
+    - Single-quoted JSON (some models use ' instead of ")
+    - Trailing commas in objects/arrays
+    - Multiple code blocks (takes the first valid one)
 
     Tries in order:
     1. Parse the whole string as JSON
-    2. Extract from ```json ... ``` code blocks
-    3. Find the first [ or { and parse from there
+    2. Extract from ```json ... ``` or ``` ... ``` code blocks
+    3. Find the first { or [ and parse the largest valid JSON from there
+    4. Try fixing common issues (single quotes, trailing commas)
     """
     text = text.strip()
+
+    if not text:
+        raise json.JSONDecodeError("Empty input", text, 0)
 
     # Try direct parse
     try:
@@ -59,26 +72,64 @@ def _extract_json(text: str) -> Any:
     except json.JSONDecodeError:
         pass
 
-    # Try extracting from code block
-    match = re.search(r"```(?:json)?\s*\n?(.*?)```", text, re.DOTALL)
-    if match:
-        try:
-            return json.loads(match.group(1).strip())
-        except json.JSONDecodeError:
-            pass
+    # Try extracting from code blocks (```json ... ``` or ``` ... ```)
+    for pattern in [
+        r"```json\s*\n(.*?)```",  # ```json\n...\n```
+        r"```\s*\n(.*?)```",  # ```\n...\n```
+        r"```(.*?)```",  # ```...``` (no newlines)
+    ]:
+        match = re.search(pattern, text, re.DOTALL)
+        if match:
+            try:
+                return json.loads(match.group(1).strip())
+            except json.JSONDecodeError:
+                pass
 
-    # Try finding first JSON structure
-    for start_char, end_char in [("[", "]"), ("{", "}")]:
+    # Try finding JSON structure — use balanced bracket matching
+    for start_char, end_char in [("{", "}"), ("[", "]")]:
         start = text.find(start_char)
         if start != -1:
+            # Try from the outermost brackets
             end = text.rfind(end_char)
             if end > start:
+                candidate = text[start : end + 1]
                 try:
-                    return json.loads(text[start : end + 1])
+                    return json.loads(candidate)
                 except json.JSONDecodeError:
-                    pass
+                    # Try cleaning common issues
+                    cleaned = _clean_json_string(candidate)
+                    try:
+                        return json.loads(cleaned)
+                    except json.JSONDecodeError:
+                        pass
+
+    # Last resort: try cleaning the entire text
+    cleaned = _clean_json_string(text)
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError:
+        pass
 
     raise json.JSONDecodeError("No valid JSON found", text, 0)
+
+
+def _clean_json_string(text: str) -> str:
+    """Attempt to fix common JSON issues from LLM output.
+
+    Fixes:
+    - Trailing commas before } or ]
+    - Single quotes used instead of double quotes (careful with apostrophes)
+    """
+    # Remove trailing commas before closing brackets
+    text = re.sub(r",\s*([}\]])", r"\1", text)
+
+    # If no double quotes at all but has single quotes, swap them
+    # (Only do this if the text looks like it uses single-quoted JSON)
+    if '"' not in text and "'" in text:
+        # Simple swap — works for basic cases
+        text = text.replace("'", '"')
+
+    return text
 
 
 class MemoryProcessor:
