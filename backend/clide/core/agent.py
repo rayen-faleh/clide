@@ -497,11 +497,42 @@ class AgentCore:
         try:
             thinker = Thinker(llm_config=self.llm_config)
 
+            # --- Gather recent conversation context ---
+            recent_conversation_context = ""
+            conversation_topic = ""
+            if self.amem:
+                with contextlib.suppress(Exception):
+                    recent_convos = await self.amem.get_recent_by_type("conversation", limit=3)
+                    if recent_convos:
+                        # Check if the most recent conversation is fresh (< 10 min)
+                        newest = recent_convos[0]
+                        if newest.created_at.tzinfo is None:
+                            newest_dt = newest.created_at.replace(tzinfo=UTC)
+                        else:
+                            newest_dt = newest.created_at
+                        age = datetime.now(UTC) - newest_dt
+
+                        if age.total_seconds() < 600:  # 10 minutes
+                            recent_conversation_context = "\n".join(
+                                f"- {c.content[:200]} [{self._format_age(c.created_at)}]"
+                                for c in recent_convos
+                            )
+                            # Extract topic from most recent conversation
+                            conversation_topic = newest.summary or newest.content[:100]
+                            logger.info(
+                                "Recent conversation found (%s ago), influencing thoughts",
+                                self._format_age(newest.created_at),
+                            )
+
             # --- Gather memory context via semantic recall ---
             memory_context = ""
             topic_query = "recent experiences and reflections"
-            if self.amem:
-                # Try to find the last thought's follow_up or topic for continuity
+
+            # Priority: recent conversation > last thought's follow_up > default
+            if conversation_topic:
+                topic_query = conversation_topic
+                logger.debug("Topic query from conversation: %s", topic_query[:80])
+            elif self.amem:
                 with contextlib.suppress(Exception):
                     last_thoughts = await self.amem.get_recent_by_type("thought", limit=1)
                     if last_thoughts:
@@ -513,6 +544,7 @@ class AgentCore:
                         elif topic:
                             topic_query = topic
 
+            if self.amem:
                 with contextlib.suppress(Exception):
                     relevant = await self.amem.recall(topic_query, limit=10)
                     memory_context = "\n".join(
@@ -677,6 +709,7 @@ class AgentCore:
                 "goals_context": goals_context,
                 "opinions_context": opinions_context,
                 "tools_context": tools_context,
+                "recent_conversations": recent_conversation_context,
                 "thought_history": thought_history,
                 "system_prompt": self.system_prompt,
                 "max_goals": max_goals if current_goal_count < max_goals else 0,

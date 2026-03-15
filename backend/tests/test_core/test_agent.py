@@ -606,7 +606,14 @@ class TestAutonomousThink:
         )
         past_thought.id = "thought-1"
         amem = MagicMock()
-        amem.get_recent_by_type = AsyncMock(return_value=[past_thought])
+
+        # Return thought for "thought" type, empty for "conversation" type
+        async def mock_get_recent_by_type(memory_type: str, limit: int = 5) -> list:  # type: ignore[type-arg]
+            if memory_type == "thought":
+                return [past_thought]
+            return []  # No recent conversations
+
+        amem.get_recent_by_type = mock_get_recent_by_type
         amem.get_random = AsyncMock(return_value=[])
         amem.recall = AsyncMock(return_value=[])
         amem.remember = AsyncMock()

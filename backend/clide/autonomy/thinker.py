@@ -26,6 +26,8 @@ disagree, wonder, speculate. This is your mind and yours alone.
 
 {mood_context}
 
+{recent_conversations}
+
 {memory_context}
 
 {goals_context}
@@ -87,6 +89,7 @@ class Thinker:
         opinions_context: str = "",
         tools_context: str = "",
         tool_results_context: str = "",
+        recent_conversations: str = "",
         thought_history: str = "",
         system_prompt: str = "",
         max_goals: int = 5,
@@ -123,6 +126,14 @@ class Thinker:
                 f"Your personality:\n{personality_context}" if personality_context else ""
             ),
             mood_context=f"Current mood: {mood_context}" if mood_context else "",
+            recent_conversations=(
+                f"RECENT CONVERSATIONS (these should heavily influence your thinking):\n"
+                f"{recent_conversations}\n"
+                f"Your thoughts should primarily reflect on, process, or build upon "
+                f"what was just discussed."
+                if recent_conversations
+                else ""
+            ),
             memory_context=(
                 f"Recent memories:\n{memory_context}"
                 if memory_context
