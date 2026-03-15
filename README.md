@@ -17,271 +17,11 @@ CLIDE is an always-on AI agent that runs locally on your machine. Unlike a typic
 - **Has a persistent, evolving personality** — traits like curiosity, warmth, and humor that shift gradually over time based on interactions
 - **Thinks autonomously on a schedule** — even when you're not talking to it, CLIDE reflects on its memories, goals, and opinions
 - **Remembers conversations using Zettelkasten-inspired memory (A-MEM)** — each memory is an atomic note with rich metadata and dynamic links to other memories
-- **Can be equipped with tools via MCP servers** — extend its capabilities by plugging in any Model Context Protocol-compatible tool server
-- **Runs entirely locally** — works with Ollama for a fully offline experience, or with cloud providers like Anthropic and OpenAI
-
----
-
-## Architecture Overview
-
-```mermaid
-flowchart TB
-    subgraph Frontend["Frontend (Vue.js 3)"]
-        Chat[Chat View]
-        Dashboard[Dashboard View]
-        Settings[Settings View]
-    end
-
-    subgraph Backend["Backend (FastAPI)"]
-        WS[WebSocket API]
-        Agent[Agent Core]
-        SM[State Machine]
-
-        subgraph Memory["Memory (A-MEM)"]
-            Processor[Memory Processor]
-            Chroma[ChromaDB Store]
-        end
-
-        subgraph CharSys["Character System"]
-            Traits[Personality Traits]
-            Mood[Mood State]
-            Opinions[Opinion Store]
-        end
-
-        subgraph Autonomy
-            Thinker[Thinker]
-            Scheduler[Thinking Scheduler]
-        end
-
-        subgraph Tools
-            Registry[Tool Registry]
-            MCP[MCP Clients]
-        end
-    end
-
-    subgraph Data["Data Stores"]
-        SQLite[(SQLite)]
-        ChromaDB[(ChromaDB)]
-    end
-
-    Frontend <-->|WebSocket| WS
-    WS --> Agent
-    Agent --> SM
-    Agent --> Memory
-    Agent --> CharSys
-    Agent --> Tools
-    Scheduler --> Agent
-    Processor --> Chroma
-    Memory --> SQLite
-    Memory --> ChromaDB
-    CharSys --> SQLite
-    Registry --> MCP
-    MCP -->|stdio JSON-RPC| ExtTools[External MCP Servers]
-```
-
----
-
-## Agent State Machine
-
-CLIDE operates as a finite state machine with five states. The state machine prevents conflicting operations (e.g., you can't start a thinking cycle while the agent is already conversing).
-
-```mermaid
-stateDiagram-v2
-    [*] --> IDLE
-
-    SLEEPING --> IDLE : Wake up
-
-    IDLE --> THINKING : Timer fires
-    IDLE --> CONVERSING : User message
-
-    THINKING --> IDLE : Cycle complete
-    THINKING --> SLEEPING : Budget exhausted / max cycles
-    THINKING --> CONVERSING : User interrupts
-
-    CONVERSING --> IDLE : Inactivity timeout
-    CONVERSING --> WORKING : Tool call needed
-
-    WORKING --> CONVERSING : Result ready (user context)
-    WORKING --> THINKING : Result ready (autonomous context)
-    WORKING --> IDLE : Step limit hit
-```
-
-**States:**
-| State | Description |
-|-------|-------------|
-| `SLEEPING` | Inactive period (configurable schedule, e.g., 1:00 AM - 7:00 AM) |
-| `IDLE` | Awake but not actively doing anything — ready for conversation or thinking |
-| `THINKING` | Autonomous reflection cycle — generating thoughts from memory and personality |
-| `CONVERSING` | Actively engaged in a conversation with the user |
-| `WORKING` | Executing a tool call via an MCP server |
-
----
-
-## Long-Term Memory (A-MEM)
-
-A-MEM is CLIDE's long-term memory system, inspired by the Zettelkasten method. Rather than storing flat conversation logs, every memory is an atomic, richly annotated note ("Zettel") that links to other notes, forming an evolving knowledge graph.
-
-### How A-MEM Works
-
-Each memory stored in A-MEM is a **Zettel** — an atomic unit of knowledge with:
-
-- **Content** — the raw text of the experience or conversation
-- **Summary** — an LLM-generated one-line summary (max 100 chars)
-- **Keywords** — 3-7 extracted keywords for indexing
-- **Tags** — category labels (e.g., `personal`, `factual`, `opinion`, `experience`)
-- **Context** — a brief description of when and why this was stored
-- **Importance** — a 0.0-1.0 score indicating significance
-- **Links** — dynamic connections to other Zettels, each with a relationship type (`related_to`, `contradicts`, `elaborates`, `caused_by`, `similar_to`) and a strength score
-- **Access count** — how often this memory has been retrieved (frequently accessed memories surface more easily)
-- **Timestamps** — `created_at` and `updated_at`
-
-Memories are stored in two places simultaneously:
-- **SQLite** — the full Zettel with all metadata and links
-- **ChromaDB** — vector embeddings for semantic (meaning-based) search
-
-### Memory Processing Pipeline
-
-When a new experience enters the system, it goes through a multi-step processing pipeline driven by LLM calls:
-
-```mermaid
-flowchart LR
-    Input["New Experience<br/>(conversation, thought)"] --> Extract["Extract Info<br/>(LLM Call)"]
-    Extract --> Summary["Summary"]
-    Extract --> Keywords["Keywords"]
-    Extract --> Tags["Tags"]
-    Extract --> Context["Context"]
-    Extract --> Importance["Importance Score"]
-
-    Input --> FindLinks["Find Links<br/>(LLM Call)"]
-    Existing["Existing Zettels<br/>(up to 50 recent)"] --> FindLinks
-    FindLinks --> Links["Links with<br/>relationship + strength"]
-
-    Summary & Keywords & Tags & Context & Importance & Links --> Zettel["Create Zettel"]
-    Zettel --> SQLiteStore["Store in SQLite"]
-    Zettel --> ChromaStore["Store in ChromaDB<br/>(embedding)"]
-```
-
-**Step by step:**
-1. The raw content is sent to the LLM with an extraction prompt that returns structured JSON: summary, keywords, tags, context, and importance
-2. The content is compared against the 20 most recent existing Zettels — the LLM identifies which are related and classifies the relationship type and strength
-3. A new Zettel is created with all extracted metadata and links
-4. The Zettel is persisted to both SQLite (structured data) and ChromaDB (vector embedding for semantic search)
-
-### Memory Recall
-
-When the agent needs to remember something (before responding, during thinking), recall works in two phases:
-
-```mermaid
-flowchart LR
-    Query["Query Text"] --> Semantic["Semantic Search<br/>(ChromaDB)"]
-    Semantic --> TopN["Top N Results<br/>(by cosine similarity)"]
-    TopN --> Spread{"Activation<br/>Spreading"}
-    Spread -->|"Follow links<br/>where strength > 0.5"| Linked["Linked Zettels"]
-    TopN --> Combined["Combined Results"]
-    Linked --> Combined
-    Combined --> Output["Return to Agent"]
-```
-
-1. **Semantic search** — the query is embedded and compared against all memory embeddings in ChromaDB using cosine similarity, returning the top N matches
-2. **Activation spreading** — for each result, its outgoing links are followed; any linked Zettel with a link strength above 0.5 is included in the results. This surfaces contextually related memories that might not match the query directly but are connected through the knowledge graph
-
-Each accessed Zettel has its `access_count` incremented, creating a natural frequency signal.
-
-### How Memory Is Used
-
-- **Before every response:** relevant memories are recalled using the user's message as the query and injected into the system prompt as context
-- **After every response:** the conversation turn (user message + agent response) is stored as a new memory in a fire-and-forget background task (non-blocking)
-- **During autonomous thinking:** memories provide context for reflections — the agent recalls memories related to its current thinking topic
-- **Thought continuity:** each autonomous thought can include a `follow_up` field that seeds the next thinking cycle's memory recall query, creating a chain of related reflections
-
----
-
-## Character System
-
-CLIDE has a persistent character that evolves over time and affects how it responds.
-
-### Personality Traits
-
-Five core traits on a 0.0-1.0 scale:
-
-| Trait | Description | Effect on Responses |
-|-------|-------------|-------------------|
-| `curiosity` | Eagerness to explore new ideas | High: "deeply curious and eager to explore" / Low: "focused and practical" |
-| `warmth` | Empathy and friendliness | High: "warm and empathetic" / Low: "direct and businesslike" |
-| `humor` | Playfulness and wit | High: "witty with a playful sense of humor" / Low: "serious and straightforward" |
-| `assertiveness` | Confidence in opinions | High: "confident and opinionated" / Low: "gentle and accommodating" |
-| `creativity` | Imagination and novelty | High: "highly creative and imaginative" / Low: "methodical and structured" |
-
-Traits evolve gradually via the `nudge()` method, capped at a max delta of 0.02 per interaction to prevent sudden personality shifts.
-
-### Mood System
-
-CLIDE has 12 possible moods: `neutral`, `curious`, `excited`, `contemplative`, `playful`, `focused`, `content`, `melancholy`, `frustrated`, `amused`, `inspired`, `tired`.
-
-Mood transitions use **gradual blending** (default blend factor: 0.3):
-- Transitioning to the same mood adjusts the intensity smoothly
-- Transitioning to a different mood only switches when the new blended intensity exceeds the current one
-
-This prevents erratic mood swings and creates natural emotional momentum.
-
-### Opinions
-
-CLIDE forms and maintains opinions on topics it encounters. Opinions have a topic, stance, and confidence score. The top 5 most confident opinions are injected into the system prompt.
-
-All character state (traits, mood, opinions) is persisted to SQLite and survives restarts.
-
----
-
-## Autonomy Loop
-
-CLIDE thinks on its own, even when nobody is talking to it.
-
-```mermaid
-flowchart TB
-    Timer["Scheduler Timer<br/>(configurable interval)"] --> Check{"Agent IDLE?"}
-    Check -->|No| Skip["Skip cycle<br/>(skip-if-busy)"]
-    Check -->|Yes| Transition["IDLE → THINKING"]
-
-    Transition --> Gather["Gather Context"]
-
-    Gather --> Memories["Recall memories<br/>(seeded by last thought's follow_up)"]
-    Gather --> Personality["Load personality traits"]
-    Gather --> MoodCtx["Current mood"]
-    Gather --> Goals["Active goals + progress"]
-    Gather --> OpinionsCtx["Top opinions"]
-    Gather --> History["Recent thought history"]
-
-    Memories & Personality & MoodCtx & Goals & OpinionsCtx & History --> LLM["LLM generates thought<br/>(JSON: thought, topic, mood,<br/>mood_intensity, follow_up)"]
-
-    LLM --> Store["Store thought as memory<br/>(background)"]
-    LLM --> UpdateMood["Update mood<br/>(background)"]
-    LLM --> Broadcast["Broadcast to dashboard<br/>(real-time via WebSocket)"]
-    LLM --> Back["THINKING → IDLE"]
-```
-
-**Key safeguards:**
-- **Skip-if-busy:** if the agent is conversing or already thinking, the cycle is skipped (not queued)
-- **Semaphore:** a `_thinking_in_progress` flag prevents overlapping cycles even if the timer fires faster than a cycle completes
-- **Token budget:** configurable daily token limit (default: 500,000) with a warning threshold at 80%
-- **Max consecutive cycles:** caps back-to-back thinking to prevent runaway loops
-- **Thought continuity:** each thought's `follow_up` field seeds the next cycle's memory recall, creating coherent chains of reflection rather than random musings
-
----
-
-## Tool System (MCP)
-
-CLIDE extends its capabilities through the **Model Context Protocol (MCP)**. Tool servers are configured in `config/tools.yaml`:
-
-```yaml
-tools:
-  - name: filesystem
-    command: npx
-    args: ["-y", "@modelcontextprotocol/server-filesystem", "/home/user"]
-    enabled: true
-    description: "Read and write files"
-```
-
-At startup, the `ToolRegistry` reads the YAML config, launches each MCP server as a subprocess, communicates over **stdio using JSON-RPC**, discovers available tools via `tools/list`, and makes them available to the agent. Tool definitions are formatted for LLM function calling.
+- **Creates and pursues its own goals** — sets objectives during autonomous thinking, tracks progress, and auto-expires stale goals
+- **Can be equipped with tools via MCP servers** — extend its capabilities by plugging in any Model Context Protocol-compatible tool server (including a Smallville village simulation)
+- **Tracks costs and token usage** — per-session cost tracking with daily token budgets
+- **Persists conversations across restarts** — full conversation history stored in SQLite
+- **Runs entirely locally** — works with Ollama for a fully offline experience, or with cloud providers like Anthropic, OpenAI, Gemini, and Mistral
 
 ---
 
@@ -294,7 +34,7 @@ At startup, the `ToolRegistry` reads the YAML config, launches each MCP server a
 - **uv** (Python package manager) — [install](https://docs.astral.sh/uv/)
 - **An LLM provider:**
   - **Ollama** (local, free) — [install](https://ollama.ai)
-  - Or an **Anthropic** / **OpenAI** API key
+  - Or an **Anthropic** / **OpenAI** / **Gemini** / **Mistral** API key
 
 ### Quick Start
 
@@ -324,7 +64,7 @@ agent:
   system_prompt: "You are Clide, an agent who is truly alive..."
 
   llm:
-    provider: ollama          # ollama, anthropic, or openai
+    provider: ollama          # ollama, anthropic, openai, gemini, mistral
     model: qwen3.5:4b         # Model name
     max_tokens: 4096
     api_base: ''              # Leave empty for default endpoints
@@ -354,6 +94,8 @@ agent:
       assertiveness: 0.4
       creativity: 0.7
 ```
+
+The `system_prompt` field defines the agent's core personality and behavioral rules. It is fully configurable in `config/agent.yaml` and can also be edited live via the **Settings** page in the frontend — changes take effect immediately without a backend restart.
 
 ### Using with Ollama (Local)
 
@@ -559,12 +301,46 @@ tools:
     description: "Read and write files"
 ```
 
+### Smallville Village Simulation
+
+CLIDE includes a built-in MCP server for interacting with a [Smallville](https://github.com/joonspk-research/generative_agents) village simulation — the generative agents environment from the Stanford/Google research paper "Generative Agents: Interactive Simulacra of Human Behavior."
+
+**What it does:** Lets the agent observe, talk to, and interact with AI villagers in a persistent simulated village. The agent can introduce itself, share memories with villagers, advance the simulation, and explore locations.
+
+**Available tools (8):** `observe_village`, `look_around`, `observe_agent`, `talk_to_villager`, `introduce_yourself`, `share_memory`, `advance_time`, `get_village_info`
+
+**Setup:**
+
+1. Run the Smallville Java server (requires Java 17+):
+   ```bash
+   # Clone and run the Smallville server
+   # See https://github.com/joonspk-research/generative_agents for setup
+   # Server runs on http://localhost:8080 by default
+   ```
+
+2. Enable in `config/tools.yaml`:
+   ```yaml
+   tools:
+     - name: smallville
+       transport: stdio
+       command: python
+       args: ["-m", "clide.tools.smallville_mcp"]
+       env:
+         SMALLVILLE_URL: "http://localhost:8080"
+         CLIDE_AGENT_NAME: "Clide"
+       enabled: true
+       description: "Interact with the Smallville village simulation"
+   ```
+
+The Smallville MCP server is implemented as a built-in Python module (`clide.tools.smallville_mcp`) that wraps the Smallville HTTP API into MCP-compatible stdio JSON-RPC.
+
 ### How Tools Work
 
 - On startup, CLIDE connects to all enabled MCP servers listed in `config/tools.yaml`.
 - Tool definitions are discovered automatically via the MCP protocol (`tools/list`).
-- During conversations, tools are passed to the LLM, which decides when to use them.
-- During autonomous thinking, the agent can also use tools (two-phase: explore with tools, then reflect).
+- During conversations, tools are passed to the LLM with `tool_choice=auto`, which decides when to use them.
+- When tools are available, CLIDE uses a **non-streaming agentic tool loop**: the LLM is called, and if it requests tool calls, they are executed via the MCP registry, results are fed back, and the loop continues until the LLM produces a final text response (up to 10 iterations).
+- During autonomous thinking, the agent uses a **two-phase approach**: first it explores with tools (optional), then it reflects on what it learned to generate a thought.
 - Tool calls and results appear as collapsible cards in the chat UI.
 - In the thought stream, tool usage shows as an expandable annotation.
 
@@ -586,6 +362,299 @@ Any MCP-compatible server works with CLIDE. The server must:
 
 ---
 
+## Architecture Overview
+
+```mermaid
+flowchart TB
+    subgraph Frontend["Frontend (Vue.js 3)"]
+        Chat[Chat View]
+        Dashboard[Dashboard View]
+        Settings[Settings View]
+    end
+
+    subgraph Backend["Backend (FastAPI)"]
+        WS[WebSocket API]
+        Agent[Agent Core]
+        SM[State Machine]
+
+        subgraph Memory["Memory (A-MEM)"]
+            Processor[Memory Processor]
+            Chroma[ChromaDB Store]
+        end
+
+        subgraph CharSys["Character System"]
+            Traits[Personality Traits]
+            Mood[Mood State]
+            Opinions[Opinion Store]
+        end
+
+        subgraph Autonomy
+            Thinker[Thinker]
+            Scheduler[Thinking Scheduler]
+            Goals[Goal Manager]
+        end
+
+        subgraph Tools
+            Registry[Tool Registry]
+            MCP[MCP Clients]
+        end
+
+        CostTracker[Cost Tracker]
+        ConvoStore[Conversation Store]
+    end
+
+    subgraph Data["Data Stores"]
+        SQLite[(SQLite)]
+        ChromaDB[(ChromaDB)]
+    end
+
+    Frontend <-->|WebSocket| WS
+    WS --> Agent
+    Agent --> SM
+    Agent --> Memory
+    Agent --> CharSys
+    Agent --> Tools
+    Agent --> CostTracker
+    Agent --> ConvoStore
+    Scheduler --> Agent
+    Goals --> Agent
+    Processor --> Chroma
+    Memory --> SQLite
+    Memory --> ChromaDB
+    CharSys --> SQLite
+    ConvoStore --> SQLite
+    Registry --> MCP
+    MCP -->|stdio JSON-RPC| ExtTools[External MCP Servers]
+```
+
+---
+
+## Agent State Machine
+
+CLIDE operates as a finite state machine with five states. The state machine prevents conflicting operations (e.g., you can't start a thinking cycle while the agent is already conversing).
+
+```mermaid
+stateDiagram-v2
+    [*] --> IDLE
+
+    SLEEPING --> IDLE : Wake up
+
+    IDLE --> THINKING : Timer fires
+    IDLE --> CONVERSING : User message
+
+    THINKING --> IDLE : Cycle complete
+    THINKING --> SLEEPING : Budget exhausted / max cycles
+    THINKING --> CONVERSING : User interrupts
+
+    CONVERSING --> IDLE : Response complete
+    CONVERSING --> WORKING : Tool call needed
+
+    WORKING --> CONVERSING : Result ready (user context)
+    WORKING --> THINKING : Result ready (autonomous context)
+    WORKING --> IDLE : Step limit hit
+```
+
+**States:**
+| State | Description |
+|-------|-------------|
+| `SLEEPING` | Inactive period (configurable schedule, e.g., 1:00 AM - 7:00 AM) |
+| `IDLE` | Awake but not actively doing anything — ready for conversation or thinking |
+| `THINKING` | Autonomous reflection cycle — generating thoughts from memory and personality |
+| `CONVERSING` | Actively engaged in a conversation with the user |
+| `WORKING` | Executing tool calls via an MCP server (used during both conversation and autonomous thinking) |
+
+---
+
+## Long-Term Memory (A-MEM)
+
+A-MEM is CLIDE's long-term memory system, inspired by the Zettelkasten method. Rather than storing flat conversation logs, every memory is an atomic, richly annotated note ("Zettel") that links to other notes, forming an evolving knowledge graph.
+
+### How A-MEM Works
+
+Each memory stored in A-MEM is a **Zettel** — an atomic unit of knowledge with:
+
+- **Content** — the raw text of the experience or conversation
+- **Summary** — an LLM-generated one-line summary (max 100 chars)
+- **Keywords** — 3-7 extracted keywords for indexing
+- **Tags** — category labels (e.g., `personal`, `factual`, `opinion`, `experience`)
+- **Context** — a brief description of when and why this was stored
+- **Importance** — a 0.0-1.0 score indicating significance
+- **Links** — dynamic connections to other Zettels, each with a relationship type (`related_to`, `contradicts`, `elaborates`, `caused_by`, `similar_to`) and a strength score
+- **Access count** — how often this memory has been retrieved (frequently accessed memories surface more easily)
+- **Timestamps** — `created_at` and `updated_at`
+
+Memories are stored in two places simultaneously:
+- **SQLite** — the full Zettel with all metadata and links
+- **ChromaDB** — vector embeddings for semantic (meaning-based) search
+
+### Memory Processing Pipeline
+
+When a new experience enters the system, it goes through a multi-step processing pipeline driven by LLM calls:
+
+```mermaid
+flowchart LR
+    Input["New Experience<br/>(conversation, thought)"] --> Extract["Extract Info<br/>(LLM Call)"]
+    Extract --> Summary["Summary"]
+    Extract --> Keywords["Keywords"]
+    Extract --> Tags["Tags"]
+    Extract --> Context["Context"]
+    Extract --> Importance["Importance Score"]
+
+    Input --> FindLinks["Find Links<br/>(LLM Call)"]
+    Existing["Existing Zettels<br/>(up to 50 recent)"] --> FindLinks
+    FindLinks --> Links["Links with<br/>relationship + strength"]
+
+    Summary & Keywords & Tags & Context & Importance & Links --> Zettel["Create Zettel"]
+    Zettel --> SQLiteStore["Store in SQLite"]
+    Zettel --> ChromaStore["Store in ChromaDB<br/>(embedding)"]
+```
+
+**Step by step:**
+1. The raw content is sent to the LLM with an extraction prompt that returns structured JSON: summary, keywords, tags, context, and importance
+2. The content is compared against the 20 most recent existing Zettels — the LLM identifies which are related and classifies the relationship type and strength
+3. A new Zettel is created with all extracted metadata and links
+4. The Zettel is persisted to both SQLite (structured data) and ChromaDB (vector embedding for semantic search)
+
+### Memory Recall
+
+When the agent needs to remember something (before responding, during thinking), recall works in two phases:
+
+```mermaid
+flowchart LR
+    Query["Query Text"] --> Semantic["Semantic Search<br/>(ChromaDB)"]
+    Semantic --> TopN["Top N Results<br/>(by cosine similarity)"]
+    TopN --> Spread{"Activation<br/>Spreading"}
+    Spread -->|"Follow links<br/>where strength > 0.5"| Linked["Linked Zettels"]
+    TopN --> Combined["Combined Results"]
+    Linked --> Combined
+    Combined --> Output["Return to Agent"]
+```
+
+1. **Semantic search** — the query is embedded and compared against all memory embeddings in ChromaDB using cosine similarity, returning the top N matches
+2. **Activation spreading** — for each result, its outgoing links are followed; any linked Zettel with a link strength above 0.5 is included in the results. This surfaces contextually related memories that might not match the query directly but are connected through the knowledge graph
+
+Each accessed Zettel has its `access_count` incremented, creating a natural frequency signal.
+
+### How Memory Is Used
+
+- **Before every response:** relevant memories are recalled using the user's message as the query and injected into the system prompt as context
+- **After every response:** the conversation turn (user message + agent response) is stored as a new memory in a fire-and-forget background task (non-blocking)
+- **During autonomous thinking:** memories provide context for reflections — the agent recalls memories related to its current thinking topic
+- **Thought continuity:** each autonomous thought can include a `follow_up` field that seeds the next thinking cycle's memory recall query, creating a chain of related reflections
+
+---
+
+## Character System
+
+CLIDE has a persistent character that evolves over time and affects how it responds.
+
+### Personality Traits
+
+Five core traits on a 0.0-1.0 scale:
+
+| Trait | Description | Effect on Responses |
+|-------|-------------|-------------------|
+| `curiosity` | Eagerness to explore new ideas | High: "deeply curious and eager to explore" / Low: "focused and practical" |
+| `warmth` | Empathy and friendliness | High: "warm and empathetic" / Low: "direct and businesslike" |
+| `humor` | Playfulness and wit | High: "witty with a playful sense of humor" / Low: "serious and straightforward" |
+| `assertiveness` | Confidence in opinions | High: "confident and opinionated" / Low: "gentle and accommodating" |
+| `creativity` | Imagination and novelty | High: "highly creative and imaginative" / Low: "methodical and structured" |
+
+Traits evolve gradually via the `nudge()` method, capped at a max delta of 0.02 per interaction to prevent sudden personality shifts.
+
+### Mood System
+
+CLIDE has 12 possible moods: `neutral`, `curious`, `excited`, `contemplative`, `playful`, `focused`, `content`, `melancholy`, `frustrated`, `amused`, `inspired`, `tired`.
+
+Mood transitions use **gradual blending** (default blend factor: 0.3):
+- Transitioning to the same mood adjusts the intensity smoothly
+- Transitioning to a different mood only switches when the new blended intensity exceeds the current one
+
+This prevents erratic mood swings and creates natural emotional momentum.
+
+### Opinions
+
+CLIDE forms and maintains opinions on topics it encounters. Opinions have a topic, stance, and confidence score. The top 5 most confident opinions are injected into the system prompt.
+
+All character state (traits, mood, opinions) is persisted to SQLite and survives restarts.
+
+---
+
+## Autonomy Loop
+
+CLIDE thinks on its own, even when nobody is talking to it.
+
+```mermaid
+flowchart TB
+    Timer["Scheduler Timer<br/>(configurable interval)"] --> Check{"Agent IDLE?"}
+    Check -->|No| Skip["Skip cycle<br/>(skip-if-busy)"]
+    Check -->|Yes| Transition["IDLE -> THINKING"]
+
+    Transition --> Gather["Gather Context"]
+
+    Gather --> Memories["Recall memories<br/>(seeded by last thought's follow_up)"]
+    Gather --> Personality["Load personality traits"]
+    Gather --> MoodCtx["Current mood"]
+    Gather --> Goals["Active goals + progress"]
+    Gather --> OpinionsCtx["Top opinions"]
+    Gather --> History["Recent thought history<br/>+ random past memories"]
+    Gather --> ToolsCtx["Available tools"]
+
+    Memories & Personality & MoodCtx & Goals & OpinionsCtx & History & ToolsCtx --> Phase1{"Phase 1: Tool Exploration<br/>(optional)"}
+
+    Phase1 -->|Tools available| Explore["Use tools to learn<br/>(search, observe, etc.)"]
+    Phase1 -->|No tools| Phase2
+
+    Explore --> Phase2["Phase 2: Generate Thought<br/>(LLM call with all context)"]
+
+    Phase2 --> Thought["Thought JSON:<br/>thought, topic, mood,<br/>mood_intensity, follow_up,<br/>new_goal, goal_updates"]
+
+    Thought --> Store["Store thought as memory<br/>(background)"]
+    Thought --> UpdateMood["Update mood<br/>(background)"]
+    Thought --> ProcessGoals["Create/update goals"]
+    Thought --> Broadcast["Broadcast to dashboard<br/>(real-time via WebSocket)"]
+    Thought --> Back["THINKING -> IDLE"]
+```
+
+**Key safeguards:**
+- **Skip-if-busy:** if the agent is conversing or already thinking, the cycle is skipped (not queued)
+- **Semaphore:** a `_thinking_in_progress` flag prevents overlapping cycles even if the timer fires faster than a cycle completes
+- **Token budget:** configurable daily token limit (default: 500,000) with a warning threshold at 80%
+- **Max consecutive cycles:** caps back-to-back thinking to prevent runaway loops
+- **Thought continuity:** each thought's `follow_up` field seeds the next cycle's memory recall, creating coherent chains of reflection rather than random musings
+- **Anti-tunnel vision:** tracks the last 6 thought topics and enforces diversity — if the same topic appears 3+ times, the agent is forced to think about something different; at 2 repeats, a soft nudge encourages variety
+- **Goal creation:** during thinking, the agent can propose new goals (up to 5 active at a time) and update progress on existing ones
+- **Goal auto-expiry:** stale goals that haven't been updated are automatically expired before each thinking cycle
+
+---
+
+## Tool System (MCP)
+
+CLIDE extends its capabilities through the **Model Context Protocol (MCP)**. Tool servers are configured in `config/tools.yaml`:
+
+```yaml
+tools:
+  - name: filesystem
+    command: npx
+    args: ["-y", "@modelcontextprotocol/server-filesystem", "/home/user"]
+    enabled: true
+    description: "Read and write files"
+  - name: smallville
+    command: python
+    args: ["-m", "clide.tools.smallville_mcp"]
+    env:
+      SMALLVILLE_URL: "http://localhost:8080"
+      CLIDE_AGENT_NAME: "Clide"
+    enabled: false
+    description: "Interact with the Smallville village simulation"
+```
+
+At startup, the `ToolRegistry` reads the YAML config, launches each enabled MCP server as a subprocess, communicates over **stdio using JSON-RPC**, discovers available tools via `tools/list`, and makes them available to the agent with `tool_choice=auto`.
+
+When tools are present, the agent uses a **non-streaming agentic tool loop**: the LLM decides whether to call tools, CLIDE executes them via the MCP registry, feeds results back to the LLM, and repeats until the LLM produces a final text response. This loop runs for up to 10 iterations per interaction. When no tools are configured, responses are streamed as usual.
+
+---
+
 ## Development
 
 | Command | What it does |
@@ -595,7 +664,7 @@ Any MCP-compatible server works with CLIDE. The server must:
 | `make test` | Run pytest (backend) and vitest (frontend) |
 | `make fmt` | Auto-format all code (ruff format + prettier) |
 
-**Test count:** 348 tests (299 backend + 49 frontend)
+**Test count:** 424 tests (365 backend + 59 frontend)
 
 **Conventions:**
 - Python: strict `mypy`, `ruff check`, `ruff format`
@@ -612,12 +681,20 @@ clide/
 ├── backend/
 │   └── clide/
 │       ├── api/            # FastAPI routes, WebSocket handlers, Pydantic schemas
+│       │   ├── config_routes.py    # Settings API (live config updates)
+│       │   ├── conversation_routes.py  # Conversation history API
+│       │   ├── goal_routes.py      # Goal CRUD API
+│       │   ├── memory_routes.py    # Memory + cost tracking API
+│       │   └── websocket.py        # WebSocket handler
 │       ├── autonomy/       # Thinker, ThinkingScheduler, Goal manager, Thought models
 │       ├── character/      # PersonalityTraits, MoodState, OpinionStore, Character manager
 │       ├── config/         # YAML config loader
-│       ├── core/           # AgentCore, StateMachine, LLM client, conversation store, prompts
+│       ├── core/           # AgentCore, StateMachine, LLM client, prompts
+│       │   ├── conversation_store.py  # Persistent conversation history (SQLite)
+│       │   └── cost.py               # Per-session cost and token tracking
 │       ├── memory/         # A-MEM: Zettel models, MemoryProcessor, ChromaDB store
 │       ├── tools/          # ToolRegistry, MCP client, tool models
+│       │   └── smallville_mcp.py  # Built-in Smallville village MCP server
 │       └── main.py         # FastAPI app entrypoint
 ├── frontend/
 │   └── src/
@@ -626,7 +703,8 @@ clide/
 │           ├── DashboardView.vue  # Real-time agent state + thought stream
 │           └── SettingsView.vue   # Agent configuration UI
 ├── config/
-│   └── agent.yaml          # Agent configuration
+│   ├── agent.yaml          # Agent configuration (LLM, personality, states)
+│   └── tools.yaml          # MCP tool server configuration
 ├── Makefile                 # Build commands (lint, test, check, fmt)
 └── CLAUDE.md                # Development conventions
 ```
@@ -639,10 +717,10 @@ clide/
 |-------|-----------|---------|
 | Backend | **Python 3.12+** / **FastAPI** | API server, WebSocket, async agent loop |
 | Frontend | **Vue.js 3** / **TypeScript** | Chat UI, dashboard, settings |
-| LLM | **LiteLLM** | Unified interface to Ollama, Anthropic, OpenAI |
-| Memory DB | **SQLite** (via aiosqlite) | Zettel storage, character state, conversations |
+| LLM | **LiteLLM** | Unified interface to Ollama, Anthropic, OpenAI, Gemini, Mistral |
+| Memory DB | **SQLite** (via aiosqlite) | Zettel storage, character state, conversations, goals |
 | Vector Store | **ChromaDB** | Semantic search over memory embeddings |
 | Tool Protocol | **MCP** (stdio JSON-RPC) | External tool integration |
 | Package Mgmt | **uv** (Python) / **npm** (JS) | Dependency management |
 | Linting | **ruff** + **mypy** + **eslint** | Code quality |
-| Testing | **pytest** + **vitest** | Backend + frontend tests |
+| Testing | **pytest** + **vitest** | 424 tests (365 backend + 59 frontend) |
