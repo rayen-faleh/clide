@@ -23,12 +23,19 @@ config_router = APIRouter(prefix="/api/config", tags=["config"])
 
 CONFIG_PATH = _PROJECT_ROOT / "config" / "agent.yaml"
 TOOLS_PATH = _PROJECT_ROOT / "config" / "tools.yaml"
+SKILLS_DIR = _PROJECT_ROOT / "skills"
 
 
 class ConfigUpdate(BaseModel):
     """Partial configuration update."""
 
     agent: dict[str, Any] | None = None
+
+
+class SkillUpdate(BaseModel):
+    """Skill file content update."""
+
+    content: str
 
 
 @config_router.get("")
@@ -123,6 +130,34 @@ async def get_tools_status() -> dict[str, Any]:
                     )
 
     return {"tools": tools, "count": len(tools)}
+
+
+@config_router.get("/tools/{tool_name}/skill")
+async def get_tool_skill(tool_name: str) -> dict[str, Any]:
+    """Get skill instructions for a tool."""
+    SKILLS_DIR.mkdir(parents=True, exist_ok=True)
+    skill_file = SKILLS_DIR / f"{tool_name}.md"
+    if skill_file.exists():
+        return {"tool_name": tool_name, "content": skill_file.read_text(), "exists": True}
+    return {"tool_name": tool_name, "content": "", "exists": False}
+
+
+@config_router.post("/tools/{tool_name}/skill")
+async def save_tool_skill(tool_name: str, body: SkillUpdate) -> dict[str, Any]:
+    """Save skill instructions for a tool."""
+    SKILLS_DIR.mkdir(parents=True, exist_ok=True)
+    skill_file = SKILLS_DIR / f"{tool_name}.md"
+    skill_file.write_text(body.content)
+    return {"tool_name": tool_name, "saved": True}
+
+
+@config_router.delete("/tools/{tool_name}/skill")
+async def delete_tool_skill(tool_name: str) -> dict[str, Any]:
+    """Delete skill instructions for a tool."""
+    skill_file = SKILLS_DIR / f"{tool_name}.md"
+    if skill_file.exists():
+        skill_file.unlink()
+    return {"tool_name": tool_name, "deleted": True}
 
 
 def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> None:

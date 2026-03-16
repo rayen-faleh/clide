@@ -275,11 +275,14 @@ class AgentCore:
         if self.character:
             personality = self.character.build_personality_prompt()
 
+        tool_skills = self._load_tool_skills()
+
         system = build_system_prompt(
             self.system_prompt,
             personality_additions=personality,
             memory_context=memory_context,
             agent_born_at=self.born_at,
+            tool_skills=tool_skills if tool_skills else None,
         )
 
         # Build messages for LLM
@@ -656,6 +659,12 @@ class AgentCore:
 
                 # --- Phase 1: Tool exploration (optional) ---
                 if self.tool_registry and tool_defs:
+                    # Load skill instructions for tool usage guidance
+                    think_tool_skills = self._load_tool_skills()
+                    think_system = build_system_prompt(
+                        self.system_prompt,
+                        tool_skills=think_tool_skills if think_tool_skills else None,
+                    )
                     tool_prompt = (
                         "You are in your autonomous thinking mode. "
                         "Based on your current thoughts, goals, and curiosity, "
@@ -667,7 +676,7 @@ class AgentCore:
                         f"Your goals: {goals_context}\n"
                     )
                     tool_messages: list[dict[str, Any]] = [
-                        {"role": "system", "content": self.system_prompt},
+                        {"role": "system", "content": think_system},
                         {"role": "user", "content": tool_prompt},
                     ]
 
@@ -770,6 +779,20 @@ class AgentCore:
             if self.state_machine.state == AgentState.THINKING:
                 logger.info("Agent state: THINKING -> IDLE (thinking cycle complete)")
                 self.state_machine.transition(AgentState.IDLE, "thinking cycle complete")
+
+    def _load_tool_skills(self) -> dict[str, str]:
+        """Load tool skill files from the skills/ directory."""
+        from clide.config.settings import _PROJECT_ROOT
+
+        skills_dir = _PROJECT_ROOT / "skills"
+        skills: dict[str, str] = {}
+        if skills_dir.exists():
+            for skill_file in skills_dir.glob("*.md"):
+                tool_name = skill_file.stem
+                content = skill_file.read_text().strip()
+                if content:
+                    skills[tool_name] = content
+        return skills
 
     async def clear_history(self) -> None:
         """Clear conversation history."""

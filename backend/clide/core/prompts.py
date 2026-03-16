@@ -17,6 +17,7 @@ def build_system_prompt(
     personality_additions: str = "",
     memory_context: str = "",
     agent_born_at: datetime | None = None,
+    tool_skills: dict[str, str] | None = None,
 ) -> str:
     """Build the full system prompt with optional additions.
 
@@ -25,6 +26,7 @@ def build_system_prompt(
         personality_additions: Additional personality flavoring (from character module)
         memory_context: Relevant memories to inject
         agent_born_at: When the agent was first created (for age awareness)
+        tool_skills: Per-tool skill instructions to inject (tool_name -> instructions)
 
     Returns:
         Complete system prompt string
@@ -49,5 +51,11 @@ def build_system_prompt(
 
     if memory_context:
         parts.append(f"\nRelevant memories:\n{memory_context}")
+
+    if tool_skills:
+        skills_lines = ["## Tool Usage Guidelines\n"]
+        for tool_name, skill_text in tool_skills.items():
+            skills_lines.append(f"### {tool_name}\n{skill_text}\n")
+        parts.append("\n".join(skills_lines))
 
     return "\n\n".join(parts)

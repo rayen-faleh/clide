@@ -190,6 +190,90 @@ class TestConfigUpdateModel:
         assert update.agent == {"name": "NewName"}
 
 
+class TestToolSkillEndpoints:
+    """Tests for the tool skill file CRUD endpoints."""
+
+    async def test_get_skill_not_found(
+        self, client: AsyncClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When no skill file exists, return empty content and exists=false."""
+        import clide.api.config_routes as config_mod
+
+        skills_dir = tmp_path / "skills"
+        monkeypatch.setattr(config_mod, "SKILLS_DIR", skills_dir)
+
+        response = await client.get("/api/config/tools/web_search/skill")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["tool_name"] == "web_search"
+        assert data["content"] == ""
+        assert data["exists"] is False
+
+    async def test_save_and_get_skill(
+        self, client: AsyncClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Save a skill, then retrieve it and verify content."""
+        import clide.api.config_routes as config_mod
+
+        skills_dir = tmp_path / "skills"
+        monkeypatch.setattr(config_mod, "SKILLS_DIR", skills_dir)
+
+        # Save
+        response = await client.post(
+            "/api/config/tools/web_search/skill",
+            json={"content": "Always cite sources."},
+        )
+        assert response.status_code == 200
+        assert response.json()["saved"] is True
+
+        # Retrieve
+        response = await client.get("/api/config/tools/web_search/skill")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["tool_name"] == "web_search"
+        assert data["content"] == "Always cite sources."
+        assert data["exists"] is True
+
+    async def test_delete_skill(
+        self, client: AsyncClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Save a skill, delete it, verify it's gone."""
+        import clide.api.config_routes as config_mod
+
+        skills_dir = tmp_path / "skills"
+        monkeypatch.setattr(config_mod, "SKILLS_DIR", skills_dir)
+
+        # Save first
+        await client.post(
+            "/api/config/tools/my_tool/skill",
+            json={"content": "Some instructions"},
+        )
+
+        # Delete
+        response = await client.delete("/api/config/tools/my_tool/skill")
+        assert response.status_code == 200
+        assert response.json()["deleted"] is True
+
+        # Verify gone
+        response = await client.get("/api/config/tools/my_tool/skill")
+        assert response.status_code == 200
+        assert response.json()["exists"] is False
+        assert response.json()["content"] == ""
+
+    async def test_delete_skill_nonexistent(
+        self, client: AsyncClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Deleting a non-existent skill should not error."""
+        import clide.api.config_routes as config_mod
+
+        skills_dir = tmp_path / "skills"
+        monkeypatch.setattr(config_mod, "SKILLS_DIR", skills_dir)
+
+        response = await client.delete("/api/config/tools/nonexistent/skill")
+        assert response.status_code == 200
+        assert response.json()["deleted"] is True
+
+
 class TestLiveAgentUpdate:
     """Tests that PATCH /api/config applies changes to the live agent core."""
 

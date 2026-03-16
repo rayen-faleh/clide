@@ -50,3 +50,23 @@ class TestPrompts:
     def test_build_without_born_at_has_no_age(self) -> None:
         result = build_system_prompt()
         assert "You have been alive" not in result
+
+    def test_build_with_tool_skills(self) -> None:
+        skills = {
+            "web_search": "Use web search to find current information.",
+            "file_reader": "Read files cautiously, prefer small reads.",
+        }
+        result = build_system_prompt(tool_skills=skills)
+        assert "## Tool Usage Guidelines" in result
+        assert "### web_search" in result
+        assert "Use web search to find current information." in result
+        assert "### file_reader" in result
+        assert "Read files cautiously, prefer small reads." in result
+
+    def test_build_without_tool_skills(self) -> None:
+        result = build_system_prompt(tool_skills=None)
+        assert "Tool Usage Guidelines" not in result
+
+    def test_build_with_empty_tool_skills(self) -> None:
+        result = build_system_prompt(tool_skills={})
+        assert "Tool Usage Guidelines" not in result
