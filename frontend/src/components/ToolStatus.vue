@@ -9,6 +9,10 @@ interface Tool {
 defineProps<{
   tools: Tool[]
 }>()
+
+const emit = defineEmits<{
+  editSkill: [toolName: string]
+}>()
 </script>
 
 <template>
@@ -21,6 +25,7 @@ defineProps<{
           <span class="tool-name">{{ tool.name }}</span>
           <span class="tool-description">{{ tool.description }}</span>
         </div>
+        <button class="skill-btn" @click="emit('editSkill', tool.name)">Edit Skill</button>
       </div>
     </div>
   </div>
@@ -56,6 +61,25 @@ defineProps<{
   border-radius: 6px;
 }
 
+.skill-btn {
+  flex-shrink: 0;
+  padding: 4px 10px;
+  font-size: 11px;
+  color: var(--color-text-secondary);
+  background-color: transparent;
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  cursor: pointer;
+  transition:
+    background-color 0.15s,
+    color 0.15s;
+}
+
+.skill-btn:hover {
+  background-color: var(--color-button);
+  color: var(--color-user-text);
+}
+
 .status-dot {
   width: 8px;
   height: 8px;
@@ -76,6 +100,8 @@ defineProps<{
 }
 
 .tool-info {
+  flex: 1;
+  min-width: 0;
   display: flex;
   flex-direction: column;
   gap: 2px;

@@ -16,6 +16,8 @@ const tools = ref<Tool[]>([])
 const loading = ref(true)
 const saving = ref(false)
 const toast = ref<{ message: string; type: 'success' | 'error' } | null>(null)
+const editingSkill = ref<string | null>(null)
+const skillContent = ref('')
 
 async function fetchConfig() {
   try {
@@ -68,6 +70,46 @@ function showToast(message: string, type: 'success' | 'error') {
   }, 3000)
 }
 
+async function loadSkill(toolName: string) {
+  try {
+    const res = await fetch(`/api/config/tools/${toolName}/skill`)
+    if (res.ok) {
+      const data = await res.json()
+      skillContent.value = data.content || ''
+    }
+  } catch (err) {
+    console.error(err)
+  }
+  editingSkill.value = toolName
+}
+
+async function saveSkill() {
+  if (!editingSkill.value) return
+  try {
+    await fetch(`/api/config/tools/${editingSkill.value}/skill`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content: skillContent.value }),
+    })
+    // Also cache in localStorage
+    const cached = JSON.parse(localStorage.getItem('clide_tool_skills') || '{}')
+    cached[editingSkill.value] = skillContent.value
+    localStorage.setItem('clide_tool_skills', JSON.stringify(cached))
+
+    showToast('Skill saved', 'success')
+    editingSkill.value = null
+    skillContent.value = ''
+  } catch (err) {
+    showToast('Failed to save skill', 'error')
+    console.error(err)
+  }
+}
+
+function cancelSkillEdit() {
+  editingSkill.value = null
+  skillContent.value = ''
+}
+
 onMounted(async () => {
   await Promise.all([fetchConfig(), fetchToolsStatus()])
   loading.value = false
@@ -108,7 +150,26 @@ onMounted(async () => {
         <div class="settings-sidebar">
           <section class="config-section">
             <h3 class="section-title">Tool Status</h3>
-            <ToolStatus :tools="tools" />
+            <ToolStatus :tools="tools" @edit-skill="loadSkill" />
+          </section>
+
+          <!-- Skill Editor (shown when editing) -->
+          <section v-if="editingSkill" class="config-section skill-editor">
+            <h3 class="section-title">Skill: {{ editingSkill }}</h3>
+            <p class="skill-hint">
+              Describe how this tool should be used. The agent will see these instructions in its
+              system prompt.
+            </p>
+            <textarea
+              v-model="skillContent"
+              rows="10"
+              placeholder="Write instructions for how to use this tool..."
+              class="skill-textarea"
+            ></textarea>
+            <div class="skill-actions">
+              <button class="save-btn" @click="saveSkill">Save</button>
+              <button class="cancel-btn" @click="cancelSkillEdit">Cancel</button>
+            </div>
           </section>
         </div>
       </div>
@@ -253,6 +314,74 @@ onMounted(async () => {
     transform: translateX(0);
     opacity: 1;
   }
+}
+
+.skill-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.skill-hint {
+  font-size: 12px;
+  color: var(--color-text-secondary);
+  line-height: 1.4;
+}
+
+.skill-textarea {
+  width: 100%;
+  padding: 8px 10px;
+  background-color: var(--color-input-bg);
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  color: var(--color-text);
+  font-size: 13px;
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  outline: none;
+  resize: vertical;
+}
+
+.skill-textarea:focus {
+  border-color: var(--color-focus);
+}
+
+.skill-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.save-btn {
+  padding: 6px 16px;
+  background-color: var(--color-button);
+  color: var(--color-user-text);
+  border: none;
+  border-radius: 4px;
+  font-size: 13px;
+  cursor: pointer;
+  transition: background-color 0.15s;
+}
+
+.save-btn:hover {
+  background-color: var(--color-button-hover);
+}
+
+.cancel-btn {
+  padding: 6px 16px;
+  background-color: transparent;
+  color: var(--color-text-secondary);
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  font-size: 13px;
+  cursor: pointer;
+  transition:
+    background-color 0.15s,
+    color 0.15s;
+}
+
+.cancel-btn:hover {
+  background-color: var(--color-surface);
+  color: var(--color-text);
 }
 
 @media (max-width: 768px) {
