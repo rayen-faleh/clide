@@ -6,6 +6,7 @@ import asyncio
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -1211,18 +1212,37 @@ class TestProcessWithTools:
         agent = AgentCore(tool_registry=registry)
         agent.state_machine.transition(AgentState.CONVERSING, "test")
 
-        # Always return tool calls — should stop at 10
-        tool_response = _make_tool_response(tool_calls=[("web_search", '{"q": "x"}', "call_1")])
+        # Always return tool calls — should stop at phase_size * max_phases
+        # Use small values for test speed
+        call_counter = 0
 
-        with patch("clide.core.agent.complete_with_tools", new_callable=AsyncMock) as mock_cwt:
-            mock_cwt.return_value = tool_response
+        def make_unique_tool_response() -> MagicMock:
+            nonlocal call_counter
+            call_counter += 1
+            return _make_tool_response(
+                tool_calls=[("web_search", f'{{"q": "x{call_counter}"}}', f"call_{call_counter}")]
+            )
+
+        checkpoint_response = MagicMock()
+        checkpoint_response.choices = [MagicMock()]
+        checkpoint_response.choices[0].message.content = "Checkpoint summary"
+
+        with (
+            patch("clide.core.agent.complete_with_tools", new_callable=AsyncMock) as mock_cwt,
+            patch("clide.core.agent.litellm") as mock_litellm,
+        ):
+            mock_cwt.side_effect = lambda *a, **kw: make_unique_tool_response()
+            mock_litellm.acompletion = AsyncMock(return_value=checkpoint_response)
             result = await agent._process_with_tools(  # noqa: SLF001
                 [{"role": "user", "content": "search"}],
                 registry.get_tool_definitions_for_llm(),
+                phase_size=3,
+                max_phases=2,
             )
 
-        assert "tool loop" in result.lower()
-        assert mock_cwt.await_count == 10
+        assert "extensive research" in result.lower() or "tool" in result.lower()
+        # Total tool calls should be phase_size * max_phases = 6
+        assert mock_cwt.await_count == 6
 
     @pytest.mark.asyncio
     async def test_tool_event_callback_called(self) -> None:
@@ -1286,6 +1306,271 @@ class TestProcessWithTools:
             async for chunk in agent.process_message("hi"):
                 chunks.append(chunk)
         assert chunks == ["Hello", " there", "!"]
+
+
+class TestPhasedToolExecution:
+    """Tests for phased tool execution with checkpoints and dedup."""
+
+    @pytest.mark.asyncio
+    async def test_phase_checkpoint_triggered(self) -> None:
+        """After phase_size tool calls, a checkpoint is generated."""
+        registry = _make_mock_registry()
+        agent = AgentCore(tool_registry=registry)
+        agent.state_machine.transition(AgentState.CONVERSING, "test")
+
+        call_counter = 0
+
+        def make_unique_tool_response() -> MagicMock:
+            nonlocal call_counter
+            call_counter += 1
+            return _make_tool_response(
+                tool_calls=[
+                    ("web_search", f'{{"q": "query{call_counter}"}}', f"call_{call_counter}")
+                ]
+            )
+
+        # After phase_size=3 tool calls, checkpoint fires; then text after 1 more
+        responses: list[MagicMock] = []
+        # Phase 1: 3 tool calls
+        for i in range(3):
+            responses.append(
+                _make_tool_response(tool_calls=[("web_search", f'{{"q": "q{i}"}}', f"call_{i}")])
+            )
+        # Phase 2: 1 tool call then text
+        responses.append(_make_tool_response(tool_calls=[("web_search", '{"q": "q3"}', "call_3")]))
+        responses.append(_make_tool_response(content="Final answer after phases."))
+
+        checkpoint_response = MagicMock()
+        checkpoint_response.choices = [MagicMock()]
+        checkpoint_response.choices[0].message.content = "Progress checkpoint"
+
+        with (
+            patch("clide.core.agent.complete_with_tools", new_callable=AsyncMock) as mock_cwt,
+            patch("clide.core.agent.litellm") as mock_litellm,
+        ):
+            mock_cwt.side_effect = responses
+            mock_litellm.acompletion = AsyncMock(return_value=checkpoint_response)
+            result = await agent._process_with_tools(  # noqa: SLF001
+                [{"role": "user", "content": "search"}],
+                registry.get_tool_definitions_for_llm(),
+                phase_size=3,
+                max_phases=3,
+            )
+
+        assert result == "Final answer after phases."
+        # Checkpoint should have been called once (after phase 1)
+        mock_litellm.acompletion.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_dedup_detection(self) -> None:
+        """Same tool+args called twice => second is skipped with DUPLICATE."""
+        registry = _make_mock_registry()
+        agent = AgentCore(tool_registry=registry)
+        agent.state_machine.transition(AgentState.CONVERSING, "test")
+
+        # First call: web_search with {"q": "cats"}
+        tool_response_1 = _make_tool_response(
+            tool_calls=[("web_search", '{"q": "cats"}', "call_1")]
+        )
+        # Second call: SAME tool+args (duplicate)
+        tool_response_2 = _make_tool_response(
+            tool_calls=[("web_search", '{"q": "cats"}', "call_2")]
+        )
+        text_response = _make_tool_response(content="Done.")
+
+        with patch("clide.core.agent.complete_with_tools", new_callable=AsyncMock) as mock_cwt:
+            mock_cwt.side_effect = [tool_response_1, tool_response_2, text_response]
+            messages: list[dict[str, Any]] = [{"role": "user", "content": "search cats"}]
+            result = await agent._process_with_tools(  # noqa: SLF001
+                messages,
+                registry.get_tool_definitions_for_llm(),
+            )
+
+        assert result == "Done."
+        # Tool should only be EXECUTED once (first call), duplicate skipped
+        assert registry.execute_tool.await_count == 1
+
+        # Check that a DUPLICATE message was added for the second call
+        tool_messages = [m for m in messages if m.get("role") == "tool"]
+        dup_messages = [m for m in tool_messages if "DUPLICATE" in m.get("content", "")]
+        assert len(dup_messages) == 1
+        assert "web_search" in dup_messages[0]["content"]
+
+    @pytest.mark.asyncio
+    async def test_dedup_different_args_both_execute(self) -> None:
+        """Same tool with different args => both execute (not duplicates)."""
+        registry = _make_mock_registry()
+        agent = AgentCore(tool_registry=registry)
+        agent.state_machine.transition(AgentState.CONVERSING, "test")
+
+        tool_response_1 = _make_tool_response(
+            tool_calls=[("web_search", '{"q": "cats"}', "call_1")]
+        )
+        tool_response_2 = _make_tool_response(
+            tool_calls=[("web_search", '{"q": "dogs"}', "call_2")]
+        )
+        text_response = _make_tool_response(content="Both done.")
+
+        with patch("clide.core.agent.complete_with_tools", new_callable=AsyncMock) as mock_cwt:
+            mock_cwt.side_effect = [tool_response_1, tool_response_2, text_response]
+            result = await agent._process_with_tools(  # noqa: SLF001
+                [{"role": "user", "content": "search"}],
+                registry.get_tool_definitions_for_llm(),
+            )
+
+        assert result == "Both done."
+        # Both calls should be executed (different args)
+        assert registry.execute_tool.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_max_phases_exhausted(self) -> None:
+        """When LLM always returns tool calls, loop stops at phase_size * max_phases."""
+        registry = _make_mock_registry()
+        agent = AgentCore(tool_registry=registry)
+        agent.state_machine.transition(AgentState.CONVERSING, "test")
+
+        call_counter = 0
+
+        def make_unique_tool_response() -> MagicMock:
+            nonlocal call_counter
+            call_counter += 1
+            return _make_tool_response(
+                tool_calls=[("web_search", f'{{"q": "x{call_counter}"}}', f"call_{call_counter}")]
+            )
+
+        checkpoint_response = MagicMock()
+        checkpoint_response.choices = [MagicMock()]
+        checkpoint_response.choices[0].message.content = "Checkpoint"
+
+        with (
+            patch("clide.core.agent.complete_with_tools", new_callable=AsyncMock) as mock_cwt,
+            patch("clide.core.agent.litellm") as mock_litellm,
+        ):
+            mock_cwt.side_effect = lambda *a, **kw: make_unique_tool_response()
+            mock_litellm.acompletion = AsyncMock(return_value=checkpoint_response)
+            result = await agent._process_with_tools(  # noqa: SLF001
+                [{"role": "user", "content": "search"}],
+                registry.get_tool_definitions_for_llm(),
+                phase_size=2,
+                max_phases=2,
+            )
+
+        # Should exhaust all phases
+        assert "extensive research" in result.lower()
+        # Total tool calls = phase_size * max_phases = 4
+        assert mock_cwt.await_count == 4
+
+    @pytest.mark.asyncio
+    async def test_phase_size_configurable(self) -> None:
+        """Verify phase_size parameter controls when checkpoints fire."""
+        registry = _make_mock_registry()
+        agent = AgentCore(tool_registry=registry)
+        agent.state_machine.transition(AgentState.CONVERSING, "test")
+
+        call_counter = 0
+
+        def make_unique_tool_response() -> MagicMock:
+            nonlocal call_counter
+            call_counter += 1
+            return _make_tool_response(
+                tool_calls=[("web_search", f'{{"q": "x{call_counter}"}}', f"call_{call_counter}")]
+            )
+
+        checkpoint_response = MagicMock()
+        checkpoint_response.choices = [MagicMock()]
+        checkpoint_response.choices[0].message.content = "Checkpoint"
+
+        # phase_size=5, max_phases=2 => total 10 tool calls, 1 checkpoint
+        with (
+            patch("clide.core.agent.complete_with_tools", new_callable=AsyncMock) as mock_cwt,
+            patch("clide.core.agent.litellm") as mock_litellm,
+        ):
+            mock_cwt.side_effect = lambda *a, **kw: make_unique_tool_response()
+            mock_litellm.acompletion = AsyncMock(return_value=checkpoint_response)
+            await agent._process_with_tools(  # noqa: SLF001
+                [{"role": "user", "content": "search"}],
+                registry.get_tool_definitions_for_llm(),
+                phase_size=5,
+                max_phases=2,
+            )
+
+        # Total tool calls = 5 * 2 = 10
+        assert mock_cwt.await_count == 10
+        # 1 checkpoint (after phase 1, before phase 2)
+        assert mock_litellm.acompletion.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_tool_call_count_tracks_correctly(self) -> None:
+        """Verify tool_call_count increments per actual tool execution, not per iteration."""
+        registry = _make_mock_registry()
+        agent = AgentCore(tool_registry=registry)
+        agent.state_machine.transition(AgentState.CONVERSING, "test")
+
+        # 2 tool calls then text — all unique
+        responses = [
+            _make_tool_response(tool_calls=[("web_search", '{"q": "first"}', "call_1")]),
+            _make_tool_response(tool_calls=[("web_search", '{"q": "second"}', "call_2")]),
+            _make_tool_response(content="Final."),
+        ]
+
+        with patch("clide.core.agent.complete_with_tools", new_callable=AsyncMock) as mock_cwt:
+            mock_cwt.side_effect = responses
+            result = await agent._process_with_tools(  # noqa: SLF001
+                [{"role": "user", "content": "search"}],
+                registry.get_tool_definitions_for_llm(),
+                phase_size=10,
+                max_phases=3,
+            )
+
+        assert result == "Final."
+        # Both tool calls executed (2 unique)
+        assert registry.execute_tool.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_checkpoint_failure_continues(self) -> None:
+        """If checkpoint generation fails, the loop continues."""
+        registry = _make_mock_registry()
+        agent = AgentCore(tool_registry=registry)
+        agent.state_machine.transition(AgentState.CONVERSING, "test")
+
+        call_counter = 0
+
+        def make_unique_tool_response() -> MagicMock:
+            nonlocal call_counter
+            call_counter += 1
+            return _make_tool_response(
+                tool_calls=[("web_search", f'{{"q": "x{call_counter}"}}', f"call_{call_counter}")]
+            )
+
+        # phase_size=2, max_phases=2 => 4 tool calls total
+        # Checkpoint fails but loop should continue
+        responses_list = [make_unique_tool_response() for _ in range(4)]
+        responses_list.append(_make_tool_response(content="Done despite checkpoint failure."))
+
+        with (
+            patch("clide.core.agent.complete_with_tools", new_callable=AsyncMock) as mock_cwt,
+            patch("clide.core.agent.litellm") as mock_litellm,
+        ):
+            # Re-generate unique responses for mock
+            call_counter = 0
+            mock_cwt.side_effect = lambda *a, **kw: make_unique_tool_response()
+            mock_litellm.acompletion = AsyncMock(side_effect=RuntimeError("LLM down"))
+            result = await agent._process_with_tools(  # noqa: SLF001
+                [{"role": "user", "content": "search"}],
+                registry.get_tool_definitions_for_llm(),
+                phase_size=2,
+                max_phases=2,
+            )
+
+        # Should still complete (exhaust phases even with checkpoint failure)
+        assert "extensive research" in result.lower()
+
+    @pytest.mark.asyncio
+    async def test_default_phase_attributes(self) -> None:
+        """Verify AgentCore has default phase attributes."""
+        agent = AgentCore()
+        assert agent.tool_phase_size == 10
+        assert agent.tool_max_phases == 3
 
 
 class TestAutonomousThinkWithTools:

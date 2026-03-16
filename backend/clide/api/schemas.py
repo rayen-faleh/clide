@@ -97,6 +97,14 @@ class ToolResultPayload(BaseModel):
     error: str | None = None
 
 
+class ToolCheckpointPayload(BaseModel):
+    """Payload for tool phase checkpoint messages."""
+
+    content: str
+    phase: int
+    total_phases: int
+
+
 class ErrorPayload(BaseModel):
     """Payload for error messages."""
 

@@ -12,9 +12,11 @@ from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
+import litellm
+
 from clide.api.schemas import AgentState
 from clide.autonomy.models import ThoughtType
-from clide.core.llm import LLMConfig, complete_with_tools, stream_completion
+from clide.core.llm import LLMConfig, _build_model_name, complete_with_tools, stream_completion
 from clide.core.prompts import build_system_prompt
 from clide.core.state import StateMachine
 
@@ -68,6 +70,8 @@ class AgentCore:
         self._tool_event_callback: Any = None  # Set by websocket handler
         self._recent_topics: list[str] = []  # Track last N thought topics
         self._topic_history_size = 6  # Remember last 6 topics
+        self.tool_phase_size = 10  # Tool calls per phase before checkpoint
+        self.tool_max_phases = 3  # Maximum number of phases
 
     @staticmethod
     def _format_age(dt: datetime) -> str:
@@ -97,127 +101,239 @@ class AgentCore:
         self,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]],
+        phase_size: int = 10,
+        max_phases: int = 3,
     ) -> str:
-        """Execute the agentic tool loop.
+        """Execute the agentic tool loop with phased checkpoints.
 
-        Calls LLM with tools. If LLM requests tool calls, executes them
-        via MCP registry, feeds results back, and loops until LLM produces
-        a text response.
+        Every ``phase_size`` tool calls, forces a text checkpoint where the LLM
+        summarises progress and plans next steps.  Also detects duplicate tool
+        calls (same name + args) and skips them with a warning message.
 
         Returns the final text response.
         """
-        max_iterations = 10
+        tool_call_count = 0
+        seen_calls: set[str] = set()  # Track "tool_name:args" for dedup
 
-        for iteration in range(max_iterations):
-            logger.info("Tool loop iteration %d/%d", iteration + 1, max_iterations)
-            try:
-                response = await complete_with_tools(messages, self.llm_config, tools)
-            except Exception:
-                logger.exception("LLM call failed in tool loop (iteration %d)", iteration + 1)
-                if iteration > 0:
-                    # We already executed tools — return a summary of what happened
-                    return (
-                        "I used some tools but couldn't finish processing the results. "
-                        "The tool results are shown above — you can ask me to try again."
-                    )
-                raise  # First iteration = no tools called yet, let it propagate
+        for current_phase in range(1, max_phases + 1):
+            # --- Phase checkpoint (between phases, not before the first) ---
+            if current_phase > 1:
+                logger.info(
+                    "Tool phase %d checkpoint (after %d calls)",
+                    current_phase - 1,
+                    tool_call_count,
+                )
 
-            choice = response.choices[0]
-            logger.debug(
-                "LLM response: finish_reason=%s, has_tool_calls=%s, has_content=%s",
-                choice.finish_reason,
-                bool(choice.message.tool_calls) if hasattr(choice.message, "tool_calls") else "N/A",
-                bool(choice.message.content),
-            )
+                checkpoint_prompt = (
+                    "You've made several tool calls. Briefly summarize what you've "
+                    "found so far and what you plan to do next. Be concise."
+                )
+                messages.append({"role": "user", "content": checkpoint_prompt})
 
-            # Check if LLM wants to call tools
-            if choice.finish_reason == "tool_calls" and choice.message.tool_calls:
-                logger.info("LLM requested %d tool call(s)", len(choice.message.tool_calls))
+                try:
+                    model_name = _build_model_name(self.llm_config)
+                    checkpoint_kwargs: dict[str, Any] = {
+                        "model": model_name,
+                        "messages": messages,
+                        "max_tokens": 200,
+                        "stream": False,
+                    }
+                    if self.llm_config.api_base:
+                        checkpoint_kwargs["api_base"] = self.llm_config.api_base
 
-                # Transition to WORKING
-                if self.state_machine.can_transition(AgentState.WORKING):
-                    self.state_machine.transition(AgentState.WORKING, "tool call")
+                    checkpoint_response = await litellm.acompletion(**checkpoint_kwargs)
+                    checkpoint_text = checkpoint_response.choices[0].message.content or ""
+                    messages.append({"role": "assistant", "content": checkpoint_text})
 
-                # Append assistant message with tool calls
-                messages.append(choice.message.model_dump())
-
-                # Execute each tool call
-                for tool_call in choice.message.tool_calls:
-                    func = tool_call.function
-                    tool_name = func.name
-                    try:
-                        arguments = (
-                            json_mod.loads(func.arguments)
-                            if isinstance(func.arguments, str)
-                            else func.arguments
-                        )
-                    except (json_mod.JSONDecodeError, TypeError):
-                        arguments = {}
-                    call_id = tool_call.id
-
-                    logger.info("Executing tool: %s(args=%s)", tool_name, str(arguments)[:200])
-
-                    # Execute via registry
-                    assert self.tool_registry is not None
-                    result = await self.tool_registry.execute_tool(tool_name, arguments)
-
-                    logger.info(
-                        "Tool %s result: success=%s, result_preview=%s",
-                        tool_name,
-                        result.success,
-                        str(result.result)[:150] if result.success else f"ERROR: {result.error}",
-                    )
-
-                    # Notify callback (WebSocket handler broadcasts this)
+                    # Broadcast checkpoint via callback
                     if self._tool_event_callback:
                         try:
                             await self._tool_event_callback(
                                 {
-                                    "tool_name": tool_name,
-                                    "arguments": arguments,
-                                    "call_id": call_id,
-                                    "result": result.result if result.success else None,
-                                    "error": result.error if not result.success else None,
-                                    "success": result.success,
+                                    "checkpoint": True,
+                                    "content": checkpoint_text,
+                                    "phase": current_phase - 1,
+                                    "tool_call_count": tool_call_count,
                                 }
                             )
                         except Exception:
-                            logger.warning("Tool event callback failed", exc_info=True)
+                            logger.warning("Checkpoint callback failed", exc_info=True)
 
-                    # Append tool result message for LLM
-                    result_content = (
-                        json_mod.dumps(result.result)
-                        if result.success
-                        else f"Error: {result.error}"
-                    )
-                    messages.append(
-                        {
-                            "role": "tool",
-                            "tool_call_id": call_id,
-                            "content": result_content,
-                        }
-                    )
+                except Exception:
+                    logger.warning("Checkpoint generation failed", exc_info=True)
 
-                # Transition back to CONVERSING
-                if self.state_machine.state == AgentState.WORKING:
-                    self.state_machine.transition(AgentState.CONVERSING, "tool results ready")
-
-                # Loop: call LLM again with tool results
-                continue
-
-            else:
-                # LLM generated text response (no more tool calls)
-                text = choice.message.content or ""
+            # --- Inner loop: up to phase_size tool calls per phase ---
+            phase_tool_count = 0
+            for _step in range(phase_size):
                 logger.info(
-                    "Tool loop done: %d iteration(s), %d chars",
-                    iteration + 1,
-                    len(text),
+                    "Tool loop step %d (phase %d/%d, %d total tool calls)",
+                    phase_tool_count + 1,
+                    current_phase,
+                    max_phases,
+                    tool_call_count,
                 )
-                return text
+                try:
+                    response = await complete_with_tools(messages, self.llm_config, tools)
+                except Exception:
+                    logger.exception(
+                        "LLM call failed in tool loop (phase %d, step %d)",
+                        current_phase,
+                        phase_tool_count + 1,
+                    )
+                    if tool_call_count > 0:
+                        return (
+                            "I used some tools but couldn't finish processing the results. "
+                            "The tool results are shown above — you can ask me to try again."
+                        )
+                    raise
 
-        # Safety: too many iterations
-        logger.warning("Tool loop hit max iterations (%d)", max_iterations)
-        return "I got caught in a tool loop. Let me try a different approach."
+                choice = response.choices[0]
+                logger.debug(
+                    "LLM response: finish_reason=%s, has_tool_calls=%s, has_content=%s",
+                    choice.finish_reason,
+                    bool(choice.message.tool_calls)
+                    if hasattr(choice.message, "tool_calls")
+                    else "N/A",
+                    bool(choice.message.content),
+                )
+
+                # Check if LLM wants to call tools
+                if choice.finish_reason == "tool_calls" and choice.message.tool_calls:
+                    logger.info(
+                        "LLM requested %d tool call(s)",
+                        len(choice.message.tool_calls),
+                    )
+
+                    # Transition to WORKING
+                    if self.state_machine.can_transition(AgentState.WORKING):
+                        self.state_machine.transition(AgentState.WORKING, "tool call")
+
+                    # Append assistant message with tool calls
+                    messages.append(choice.message.model_dump())
+
+                    # Execute each tool call
+                    for tool_call in choice.message.tool_calls:
+                        func = tool_call.function
+                        tool_name = func.name
+                        try:
+                            arguments = (
+                                json_mod.loads(func.arguments)
+                                if isinstance(func.arguments, str)
+                                else func.arguments
+                            )
+                        except (json_mod.JSONDecodeError, TypeError):
+                            arguments = {}
+                        call_id = tool_call.id
+
+                        # --- Dedup check ---
+                        args_str = (
+                            func.arguments
+                            if isinstance(func.arguments, str)
+                            else json_mod.dumps(func.arguments, sort_keys=True)
+                        )
+                        call_signature = f"{tool_name}:{args_str}"
+
+                        if call_signature in seen_calls:
+                            logger.warning(
+                                "Duplicate tool call detected: %s — skipping",
+                                tool_name,
+                            )
+                            messages.append(
+                                {
+                                    "role": "tool",
+                                    "tool_call_id": call_id,
+                                    "content": (
+                                        f"DUPLICATE: You already called {tool_name} with "
+                                        f"these exact arguments. The result was the same. "
+                                        f"Do NOT call this tool again with the same "
+                                        f"arguments. Try a different approach or respond "
+                                        f"with text."
+                                    ),
+                                }
+                            )
+                            continue
+
+                        seen_calls.add(call_signature)
+
+                        logger.info(
+                            "Executing tool: %s(args=%s)",
+                            tool_name,
+                            str(arguments)[:200],
+                        )
+
+                        # Execute via registry
+                        assert self.tool_registry is not None
+                        result = await self.tool_registry.execute_tool(tool_name, arguments)
+
+                        logger.info(
+                            "Tool %s result: success=%s, result_preview=%s",
+                            tool_name,
+                            result.success,
+                            str(result.result)[:150]
+                            if result.success
+                            else f"ERROR: {result.error}",
+                        )
+
+                        # Notify callback (WebSocket handler broadcasts this)
+                        if self._tool_event_callback:
+                            try:
+                                await self._tool_event_callback(
+                                    {
+                                        "tool_name": tool_name,
+                                        "arguments": arguments,
+                                        "call_id": call_id,
+                                        "result": result.result if result.success else None,
+                                        "error": result.error if not result.success else None,
+                                        "success": result.success,
+                                    }
+                                )
+                            except Exception:
+                                logger.warning("Tool event callback failed", exc_info=True)
+
+                        # Append tool result message for LLM
+                        result_content = (
+                            json_mod.dumps(result.result)
+                            if result.success
+                            else f"Error: {result.error}"
+                        )
+                        messages.append(
+                            {
+                                "role": "tool",
+                                "tool_call_id": call_id,
+                                "content": result_content,
+                            }
+                        )
+
+                        tool_call_count += 1
+                        phase_tool_count += 1
+
+                    # Transition back to CONVERSING
+                    if self.state_machine.state == AgentState.WORKING:
+                        self.state_machine.transition(AgentState.CONVERSING, "tool results ready")
+
+                    # Loop: call LLM again with tool results
+                    continue
+
+                else:
+                    # LLM generated text response (no more tool calls)
+                    text = choice.message.content or ""
+                    logger.info(
+                        "Tool loop done: %d phase(s), %d tool calls, %d chars",
+                        current_phase,
+                        tool_call_count,
+                        len(text),
+                    )
+                    return text
+
+        # Max phases exhausted
+        logger.warning(
+            "Tool loop exhausted all %d phases (%d total calls)",
+            max_phases,
+            tool_call_count,
+        )
+        return (
+            "I've done extensive research with multiple tool calls. Let me summarize what I found."
+        )
 
     async def process_message(self, content: str) -> AsyncIterator[str]:
         """Process a user message and yield response chunks.
@@ -304,7 +420,12 @@ class AgentCore:
         if tool_definitions:
             # TOOL-AWARE PATH: non-streaming with tool loop
             logger.info("Using tool-aware path (%d tools)", len(tool_definitions))
-            full_response = await self._process_with_tools(messages, tool_definitions)
+            full_response = await self._process_with_tools(
+                messages,
+                tool_definitions,
+                phase_size=self.tool_phase_size,
+                max_phases=self.tool_max_phases,
+            )
             yield full_response
         else:
             # SIMPLE PATH: streaming without tools (existing behavior)

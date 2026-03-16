@@ -30,6 +30,8 @@ class ThinkingSettings(BaseModel):
 
 class WorkingSettings(BaseModel):
     max_tool_steps: int = 10
+    phase_size: int = 10
+    max_phases: int = 3
 
 
 class ConversingSettings(BaseModel):

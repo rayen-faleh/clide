@@ -176,6 +176,8 @@ agent:
       max_consecutive_cycles: 5
     working:
       max_tool_steps: 10
+      phase_size: 10
+      max_phases: 3
     conversing:
       idle_timeout_seconds: 300
     budget:
