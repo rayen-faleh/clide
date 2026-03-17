@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from enum import StrEnum
 
 logger = logging.getLogger(__name__)
@@ -58,6 +58,11 @@ class CostTracker:
     def record(self, usage: TokenUsage) -> None:
         """Record a token usage entry."""
         self._usage_log.append(usage)
+
+        # Prune entries older than 24h every 100 records to prevent unbounded growth
+        if len(self._usage_log) % 100 == 0:
+            cutoff = datetime.now(UTC) - timedelta(hours=24)
+            self._usage_log = [u for u in self._usage_log if u.timestamp >= cutoff]
 
         # Check budget
         today_usage = self.get_daily_usage()

@@ -66,8 +66,9 @@ async def stream_completion(
     if config.api_base:
         call_kwargs["api_base"] = config.api_base
 
+    # Acquire semaphore only for the initial API call, release before streaming.
+    # This prevents abandoned streams from permanently leaking semaphore slots.
     async with _llm_semaphore:
-        # Timeout only on the initial connection, not on streaming
         try:
             async with asyncio.timeout(config.timeout_seconds):
                 response = await litellm.acompletion(**call_kwargs)
@@ -75,37 +76,37 @@ async def stream_completion(
             logger.error("LLM call timed out after %ss", config.timeout_seconds)
             raise
 
-        # Stream without timeout (tokens arrive at their own pace)
-        # Handle "thinking" models (e.g., qwen3.5) that split output into
-        # reasoning_content (internal thinking) and content (actual response).
-        # We yield content tokens, and if there are none, fall back to
-        # reasoning_content so the response isn't empty.
-        chunk_count = 0
-        reasoning_chunks: list[str] = []
-        async for chunk in response:
-            delta = chunk.choices[0].delta
-            content = delta.content
-            reasoning = getattr(delta, "reasoning_content", None)
+    # Stream without holding the semaphore (tokens arrive at their own pace)
+    # Handle "thinking" models (e.g., qwen3.5) that split output into
+    # reasoning_content (internal thinking) and content (actual response).
+    # We yield content tokens, and if there are none, fall back to
+    # reasoning_content so the response isn't empty.
+    chunk_count = 0
+    reasoning_chunks: list[str] = []
+    async for chunk in response:
+        delta = chunk.choices[0].delta
+        content = delta.content
+        reasoning = getattr(delta, "reasoning_content", None)
 
-            if content:
-                chunk_count += 1
-                yield content
-            elif reasoning:
-                reasoning_chunks.append(reasoning)
+        if content:
+            chunk_count += 1
+            yield content
+        elif reasoning:
+            reasoning_chunks.append(reasoning)
 
-        # If the model only produced reasoning (thinking mode), yield that
-        # as the response so the user isn't left with an empty message.
-        if chunk_count == 0 and reasoning_chunks:
-            logger.info(
-                "LLM produced only reasoning tokens (%d chunks), yielding as response",
-                len(reasoning_chunks),
-            )
-            for rc in reasoning_chunks:
-                yield rc
-        elif chunk_count == 0:
-            logger.warning("LLM stream produced 0 content chunks")
-        else:
-            logger.debug("LLM stream complete: %d chunks yielded", chunk_count)
+    # If the model only produced reasoning (thinking mode), yield that
+    # as the response so the user isn't left with an empty message.
+    if chunk_count == 0 and reasoning_chunks:
+        logger.info(
+            "LLM produced only reasoning tokens (%d chunks), yielding as response",
+            len(reasoning_chunks),
+        )
+        for rc in reasoning_chunks:
+            yield rc
+    elif chunk_count == 0:
+        logger.warning("LLM stream produced 0 content chunks")
+    else:
+        logger.debug("LLM stream complete: %d chunks yielded", chunk_count)
 
 
 async def complete_with_tools(

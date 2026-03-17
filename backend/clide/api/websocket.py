@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 from collections.abc import AsyncIterator
@@ -240,10 +241,11 @@ async def _handle_chat_message(
     if hasattr(core, "set_tool_event_callback"):
         core.set_tool_event_callback(tool_event_handler)
 
-    # Stream response chunks
+    # Stream response chunks — ensure generator cleanup on disconnect
+    stream = core.process_message(payload.content)
     try:
         logger.info("Streaming response to client...")
-        async for chunk in core.process_message(payload.content):
+        async for chunk in stream:
             await manager.send_message(
                 websocket,
                 WSMessage(
@@ -297,3 +299,11 @@ async def _handle_chat_message(
                 ).model_dump(),
             ),
         )
+    finally:
+        # Close the async generator to release LLM connections/resources
+        if hasattr(stream, "aclose"):
+            with contextlib.suppress(Exception):
+                await stream.aclose()
+        # Clear callback to prevent holding stale WebSocket references
+        if hasattr(core, "set_tool_event_callback"):
+            core.set_tool_event_callback(None)

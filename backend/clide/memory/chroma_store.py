@@ -16,7 +16,10 @@ class ChromaMemoryStore:
         collection_name: str = "clide_memories",
         persist_directory: str = "data/chromadb",
     ) -> None:
-        self._client = chromadb.EphemeralClient()
+        if persist_directory:
+            self._client = chromadb.PersistentClient(path=persist_directory)
+        else:
+            self._client = chromadb.EphemeralClient()
         self._collection: Collection = self._client.get_or_create_collection(
             name=collection_name,
             metadata={"hnsw:space": "cosine"},
