@@ -125,3 +125,10 @@ export function useWebSocket(url: string = defaultWsUrl()) {
     off,
   }
 }
+
+// Clean up on Vite HMR to prevent handler duplication and WebSocket leaks
+if (import.meta.hot) {
+  import.meta.hot.dispose(() => {
+    resetWebSocketState()
+  })
+}

@@ -1,10 +1,13 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { ref, computed } from 'vue'
 import type { ThoughtEntry } from '@/stores/agent'
 
-defineProps<{
+const props = defineProps<{
   thoughts: ThoughtEntry[]
 }>()
+
+// Limit rendered thoughts to prevent DOM bloat
+const displayedThoughts = computed(() => props.thoughts.slice(-100))
 
 const expandedThoughts = ref(new Set<string>())
 
@@ -43,7 +46,7 @@ function formatThoughtType(type: string): string {
     <h3 class="thought-stream-title">Thought Stream</h3>
     <div v-if="thoughts.length === 0" class="thought-empty">No thoughts yet</div>
     <div v-else class="thought-list" ref="listRef">
-      <div v-for="(thought, index) in thoughts" :key="index" class="thought-entry">
+      <div v-for="(thought, index) in displayedThoughts" :key="index" class="thought-entry">
         <div class="thought-row">
           <span class="thought-time">{{ formatTime(thought.timestamp) }}</span>
           <span class="thought-content">{{ thought.content }}</span>

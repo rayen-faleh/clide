@@ -72,6 +72,7 @@ class AgentCore:
         self._topic_history_size = 6  # Remember last 6 topics
         self.tool_phase_size = 10  # Tool calls per phase before checkpoint
         self.tool_max_phases = 3  # Maximum number of phases
+        self._background_tasks: set[asyncio.Task[None]] = set()
 
     @staticmethod
     def _format_age(dt: datetime) -> str:
@@ -96,6 +97,12 @@ class AgentCore:
     def set_tool_event_callback(self, callback: Any) -> None:
         """Set callback for tool events (called by WebSocket handler)."""
         self._tool_event_callback = callback
+
+    def _track_task(self, coro: Any) -> None:
+        """Create and track a background task to prevent GC and enable cleanup."""
+        task = asyncio.create_task(coro)
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
 
     @staticmethod
     def _ensure_valid_message_order(messages: list[dict[str, Any]]) -> None:
@@ -473,7 +480,7 @@ class AgentCore:
 
         # Fire-and-forget: store memory and update character in background
         logger.debug("Storing conversation to memory (background)")
-        asyncio.create_task(self._post_response_tasks(content, full_response))
+        self._track_task(self._post_response_tasks(content, full_response))
 
     async def _post_response_tasks(self, content: str, full_response: str) -> None:
         """Background tasks after response: store memory and update character."""
@@ -900,7 +907,7 @@ class AgentCore:
                 await self._process_thought_goals(thought)
 
             # Fire-and-forget: store thought and update character in background
-            asyncio.create_task(self._post_thought_tasks(thought, mood, intensity))
+            self._track_task(self._post_thought_tasks(thought, mood, intensity))
 
             logger.info("Thought generated (%s): %s", thought_type, thought.content[:100])
             return thought.content, mood, intensity, thought.thought_type

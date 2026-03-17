@@ -114,6 +114,10 @@ export const useAgentStore = defineStore('agent', () => {
       toolEvents:
         pendingThinkingTools.value.length > 0 ? [...pendingThinkingTools.value] : undefined,
     })
+    // Cap thoughts to prevent unbounded growth
+    if (thoughts.value.length > 500) {
+      thoughts.value = thoughts.value.slice(-500)
+    }
     pendingThinkingTools.value = []
   }
 
@@ -141,17 +145,22 @@ export const useAgentStore = defineStore('agent', () => {
 
   function addMessage(entry: ChatEntry) {
     messages.value.push(entry)
+    if (messages.value.length > 500) {
+      messages.value = messages.value.slice(-500)
+    }
   }
 
   function updateLastAssistant(content: string, done: boolean) {
-    const lastAssistant = [...messages.value]
-      .reverse()
-      .find((m): m is ChatEntry => !('type' in m && m.type === 'tool') && m.role === 'assistant')
-    if (lastAssistant) {
-      if (done) {
-        lastAssistant.streaming = false
-      } else {
-        lastAssistant.content += content
+    // Find last assistant message with reverse loop (avoids array copy on every chunk)
+    for (let i = messages.value.length - 1; i >= 0; i--) {
+      const m = messages.value[i]
+      if (!('type' in m) && m.role === 'assistant') {
+        if (done) {
+          m.streaming = false
+        } else {
+          m.content += content
+        }
+        break
       }
     }
     if (done) {

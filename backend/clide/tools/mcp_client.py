@@ -101,6 +101,24 @@ class MCPClient:
         except Exception as e:
             logger.error("Failed to connect to MCP server %s: %s", self.config.name, e)
             self._status = ToolStatus.ERROR
+            # Clean up orphaned subprocess and tasks
+            if self._reader_task:
+                self._reader_task.cancel()
+                self._reader_task = None
+            if self._stderr_task:
+                self._stderr_task.cancel()
+                self._stderr_task = None
+            if self._process:
+                try:
+                    self._process.terminate()
+                    await asyncio.wait_for(self._process.wait(), timeout=5.0)
+                except (TimeoutError, ProcessLookupError):
+                    self._process.kill()
+                self._process = None
+            for future in self._pending.values():
+                if not future.done():
+                    future.cancel()
+            self._pending.clear()
             return False
 
     async def call_tool(self, tool_name: str, arguments: dict[str, Any]) -> ToolResult:
@@ -166,6 +184,12 @@ class MCPClient:
                 self._process.kill()
             self._process = None
 
+        # Cancel any pending futures
+        for future in self._pending.values():
+            if not future.done():
+                future.cancel()
+        self._pending.clear()
+
         self._status = ToolStatus.UNAVAILABLE
         self._tools = []
         logger.info("MCP server %s disconnected", self.config.name)
@@ -185,7 +209,7 @@ class MCPClient:
             "params": params,
         }
 
-        future: asyncio.Future[dict[str, Any]] = asyncio.get_event_loop().create_future()
+        future: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
         self._pending[request_id] = future
 
         data = json.dumps(message) + "\n"
@@ -238,6 +262,15 @@ class MCPClient:
                 break
             except Exception as e:
                 logger.debug("Error reading MCP response: %s", e)
+
+        # Reader exited — subprocess likely died
+        if self._status == ToolStatus.AVAILABLE:
+            self._status = ToolStatus.ERROR
+            logger.warning("MCP server %s: reader exited, marking as ERROR", self.config.name)
+        for future in self._pending.values():
+            if not future.done():
+                future.cancel()
+        self._pending.clear()
 
     async def _read_stderr(self) -> None:
         """Read stderr to prevent buffer deadlock."""
