@@ -42,10 +42,11 @@ class StateMachine:
 
     VALID_TRANSITIONS: ClassVar[dict[AgentState, set[AgentState]]] = {
         AgentState.SLEEPING: {AgentState.IDLE},
-        AgentState.IDLE: {AgentState.THINKING, AgentState.CONVERSING},
+        AgentState.IDLE: {AgentState.THINKING, AgentState.CONVERSING, AgentState.WORKSHOP},
         AgentState.THINKING: {AgentState.IDLE, AgentState.SLEEPING, AgentState.CONVERSING},
-        AgentState.CONVERSING: {AgentState.IDLE, AgentState.WORKING},
+        AgentState.CONVERSING: {AgentState.IDLE, AgentState.WORKING, AgentState.WORKSHOP},
         AgentState.WORKING: {AgentState.CONVERSING, AgentState.THINKING, AgentState.IDLE},
+        AgentState.WORKSHOP: {AgentState.IDLE, AgentState.SLEEPING, AgentState.CONVERSING},
     }
 
     def __init__(self, initial_state: AgentState = AgentState.IDLE) -> None:

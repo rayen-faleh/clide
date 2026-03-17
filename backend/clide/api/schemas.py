@@ -25,6 +25,11 @@ class WSMessageType(StrEnum):
     STATE_CHANGE = "state_change"
     STATUS = "status"
     ERROR = "error"
+    WORKSHOP_STARTED = "workshop_started"
+    WORKSHOP_PLAN = "workshop_plan"
+    WORKSHOP_DIALOGUE = "workshop_dialogue"
+    WORKSHOP_STEP_UPDATE = "workshop_step_update"
+    WORKSHOP_ENDED = "workshop_ended"
 
 
 class AgentState(StrEnum):
@@ -35,6 +40,7 @@ class AgentState(StrEnum):
     THINKING = "thinking"
     CONVERSING = "conversing"
     WORKING = "working"
+    WORKSHOP = "workshop"
 
 
 class WSMessage(BaseModel):
@@ -127,3 +133,44 @@ class ErrorPayload(BaseModel):
 
     message: str
     code: str = "unknown"
+
+
+class WorkshopStartedPayload(BaseModel):
+    """Payload for workshop session start."""
+
+    session_id: str
+    goal_description: str
+
+
+class WorkshopPlanPayload(BaseModel):
+    """Payload for workshop plan broadcast."""
+
+    session_id: str
+    objective: str
+    approach: str
+    steps: list[dict[str, Any]]
+
+
+class WorkshopDialoguePayload(BaseModel):
+    """Payload for workshop inner dialogue."""
+
+    session_id: str
+    content: str
+    is_tool_event: bool = False
+
+
+class WorkshopStepUpdatePayload(BaseModel):
+    """Payload for workshop step status changes."""
+
+    session_id: str
+    step_index: int
+    status: str
+    result_summary: str = ""
+
+
+class WorkshopEndedPayload(BaseModel):
+    """Payload for workshop session end."""
+
+    session_id: str
+    status: str
+    summary: str = ""

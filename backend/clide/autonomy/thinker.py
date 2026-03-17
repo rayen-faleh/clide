@@ -130,7 +130,13 @@ melancholy, frustrated, amused, inspired, tired, neutral", \
 "new_goal": "a goal you want to pursue (leave empty string if none)", \
 "goal_updates": "array of {{\\"description\\": \\"partial match\\", \
 \\"progress\\": 0.0-1.0, \\"status\\": \\"active|completed|abandoned\\", \
-\\"reason\\": \\"why\\"}} (empty array if no updates)"}}
+\\"reason\\": \\"why\\"}} (empty array if no updates)", \
+"workshop_worthy": true/false}}
+
+Set workshop_worthy to true ONLY if this goal requires sustained multi-step \
+work (research, writing, video production, book writing) that would benefit \
+from a focused workshop session. Simple goals (check status, look something \
+up, form an opinion) should NOT trigger a workshop.
 
 Return ONLY the JSON."""
 
@@ -341,6 +347,7 @@ class Thinker:
         follow_up = ""
         new_goal = ""
         goal_updates_raw: list[dict[str, Any]] = []
+        workshop_worthy_raw = "false"
         try:
             data = _extract_json(response_text)
             thought_content = str(data.get("thought", response_text))
@@ -354,6 +361,7 @@ class Thinker:
                 raw_updates = data.get("goal_updates", [])
                 if isinstance(raw_updates, list):
                     goal_updates_raw = [u for u in raw_updates if isinstance(u, dict)]
+                workshop_worthy_raw = str(data.get("workshop_worthy", False)).lower()
         except (json.JSONDecodeError, ValueError, AttributeError):
             logger.warning(
                 "Failed to parse thought JSON, using raw text. Response: %s",
@@ -373,6 +381,7 @@ class Thinker:
                 "follow_up": follow_up,
                 "new_goal": new_goal,
                 "goal_updates": json.dumps(goal_updates_raw),
+                "workshop_worthy": workshop_worthy_raw,
             }
 
         thought = Thought(

@@ -40,6 +40,11 @@ class TestWSMessageType:
             "state_change",
             "status",
             "error",
+            "workshop_started",
+            "workshop_plan",
+            "workshop_dialogue",
+            "workshop_step_update",
+            "workshop_ended",
         }
         actual = {t.value for t in WSMessageType}
         assert actual == expected
@@ -51,7 +56,7 @@ class TestAgentState:
             assert isinstance(state.value, str)
 
     def test_expected_states_exist(self) -> None:
-        expected = {"sleeping", "idle", "thinking", "conversing", "working"}
+        expected = {"sleeping", "idle", "thinking", "conversing", "working", "workshop"}
         actual = {s.value for s in AgentState}
         assert actual == expected
 

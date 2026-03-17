@@ -180,6 +180,8 @@ agent:
       max_phases: 3
     conversing:
       idle_timeout_seconds: 300
+    workshop:
+      enabled: true
     budget:
       daily_token_limit: 500000
       warning_threshold: 0.8
