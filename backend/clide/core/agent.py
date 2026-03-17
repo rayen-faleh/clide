@@ -97,6 +97,16 @@ class AgentCore:
         """Set callback for tool events (called by WebSocket handler)."""
         self._tool_event_callback = callback
 
+    @staticmethod
+    def _ensure_valid_message_order(messages: list[dict[str, Any]]) -> None:
+        """Ensure the last message is not 'assistant' (Mistral requirement).
+
+        Mistral rejects requests where the last message has role=assistant.
+        If that happens, append a minimal user continuation prompt.
+        """
+        if messages and messages[-1].get("role") == "assistant":
+            messages.append({"role": "user", "content": "Continue."})
+
     async def _process_with_tools(
         self,
         messages: list[dict[str, Any]],
@@ -172,6 +182,7 @@ class AgentCore:
                     max_phases,
                     tool_call_count,
                 )
+                self._ensure_valid_message_order(messages)
                 try:
                     response = await complete_with_tools(messages, self.llm_config, tools)
                 except Exception:
@@ -423,6 +434,7 @@ class AgentCore:
         if tool_definitions:
             # TOOL-AWARE PATH: non-streaming with tool loop
             logger.info("Using tool-aware path (%d tools)", len(tool_definitions))
+            self._ensure_valid_message_order(messages)
             full_response = await self._process_with_tools(
                 messages,
                 tool_definitions,
@@ -433,6 +445,7 @@ class AgentCore:
         else:
             # SIMPLE PATH: streaming without tools (existing behavior)
             logger.info("Streaming LLM response (no tools)...")
+            self._ensure_valid_message_order(messages)
             async for chunk in stream_completion(messages, self.llm_config):
                 full_response += chunk
                 yield chunk
