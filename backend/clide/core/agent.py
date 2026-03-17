@@ -249,6 +249,7 @@ class AgentCore:
                                     "checkpoint": True,
                                     "content": checkpoint_text,
                                     "phase": current_phase - 1,
+                                    "total_phases": max_phases,
                                     "tool_call_count": tool_call_count,
                                 }
                             )
@@ -301,9 +302,19 @@ class AgentCore:
                         len(choice.message.tool_calls),
                     )
 
-                    # Transition to WORKING
+                    # Transition to WORKING and broadcast state change
                     if self.state_machine.can_transition(AgentState.WORKING):
                         self.state_machine.transition(AgentState.WORKING, "tool call")
+                        if self._tool_event_callback:
+                            with contextlib.suppress(Exception):
+                                await self._tool_event_callback(
+                                    {
+                                        "state_change": True,
+                                        "previous_state": "conversing",
+                                        "new_state": "working",
+                                        "reason": "tool call",
+                                    }
+                                )
 
                     # Append assistant message with tool calls
                     messages.append(choice.message.model_dump())
@@ -358,6 +369,20 @@ class AgentCore:
                             str(arguments)[:200],
                         )
 
+                        # Broadcast tool call BEFORE execution (shows "executing" state)
+                        if self._tool_event_callback:
+                            try:
+                                await self._tool_event_callback(
+                                    {
+                                        "tool_call": True,
+                                        "tool_name": tool_name,
+                                        "arguments": arguments,
+                                        "call_id": call_id,
+                                    }
+                                )
+                            except Exception:
+                                logger.warning("Tool call callback failed", exc_info=True)
+
                         # Execute via registry
                         assert self.tool_registry is not None
                         result = await self.tool_registry.execute_tool(tool_name, arguments)
@@ -371,13 +396,12 @@ class AgentCore:
                             else f"ERROR: {result.error}",
                         )
 
-                        # Notify callback (WebSocket handler broadcasts this)
+                        # Broadcast tool result AFTER execution
                         if self._tool_event_callback:
                             try:
                                 await self._tool_event_callback(
                                     {
-                                        "tool_name": tool_name,
-                                        "arguments": arguments,
+                                        "tool_result": True,
                                         "call_id": call_id,
                                         "result": result.result if result.success else None,
                                         "error": result.error if not result.success else None,
@@ -385,7 +409,7 @@ class AgentCore:
                                     }
                                 )
                             except Exception:
-                                logger.warning("Tool event callback failed", exc_info=True)
+                                logger.warning("Tool result callback failed", exc_info=True)
 
                         # Append tool result message for LLM
                         result_content = (
@@ -404,9 +428,19 @@ class AgentCore:
                         tool_call_count += 1
                         phase_tool_count += 1
 
-                    # Transition back to CONVERSING
+                    # Transition back to CONVERSING and broadcast
                     if self.state_machine.state == AgentState.WORKING:
                         self.state_machine.transition(AgentState.CONVERSING, "tool results ready")
+                        if self._tool_event_callback:
+                            with contextlib.suppress(Exception):
+                                await self._tool_event_callback(
+                                    {
+                                        "state_change": True,
+                                        "previous_state": "working",
+                                        "new_state": "conversing",
+                                        "reason": "tool results ready",
+                                    }
+                                )
 
                     # Loop: call LLM again with tool results
                     continue

@@ -200,7 +200,21 @@ async def _handle_chat_message(
 
     # Set tool event callback to broadcast to all clients
     async def tool_event_handler(event: dict[str, Any]) -> None:
-        """Broadcast tool call, result, and checkpoint events."""
+        """Broadcast tool call, result, checkpoint, and state change events."""
+        # Handle state change events (CONVERSING → WORKING, etc.)
+        if event.get("state_change"):
+            await manager.broadcast(
+                WSMessage(
+                    type=WSMessageType.STATE_CHANGE,
+                    payload=StateChangePayload(
+                        previous_state=AgentState(event.get("previous_state", "idle")),
+                        new_state=AgentState(event.get("new_state", "idle")),
+                        reason=event.get("reason", ""),
+                    ).model_dump(),
+                )
+            )
+            return
+
         # Handle checkpoint events from phased tool execution
         if event.get("checkpoint"):
             await manager.broadcast(
@@ -215,28 +229,56 @@ async def _handle_chat_message(
             )
             return
 
-        # Broadcast tool call
-        await manager.broadcast(
-            WSMessage(
-                type=WSMessageType.TOOL_CALL,
-                payload=ToolCallPayload(
-                    tool_name=event.get("tool_name", ""),
-                    arguments=event.get("arguments", {}),
-                    call_id=event.get("call_id", ""),
-                ).model_dump(),
+        # Handle tool call event (sent BEFORE execution)
+        if event.get("tool_call"):
+            await manager.broadcast(
+                WSMessage(
+                    type=WSMessageType.TOOL_CALL,
+                    payload=ToolCallPayload(
+                        tool_name=event.get("tool_name", ""),
+                        arguments=event.get("arguments", {}),
+                        call_id=event.get("call_id", ""),
+                    ).model_dump(),
+                )
             )
-        )
-        # Broadcast tool result
-        await manager.broadcast(
-            WSMessage(
-                type=WSMessageType.TOOL_RESULT,
-                payload=ToolResultPayload(
-                    call_id=event.get("call_id", ""),
-                    result=event.get("result"),
-                    error=event.get("error"),
-                ).model_dump(),
+            return
+
+        # Handle tool result event (sent AFTER execution)
+        if event.get("tool_result"):
+            await manager.broadcast(
+                WSMessage(
+                    type=WSMessageType.TOOL_RESULT,
+                    payload=ToolResultPayload(
+                        call_id=event.get("call_id", ""),
+                        result=event.get("result"),
+                        error=event.get("error"),
+                    ).model_dump(),
+                )
             )
-        )
+            return
+
+        # Legacy: combined tool call + result (backwards compatibility)
+        if event.get("tool_name"):
+            await manager.broadcast(
+                WSMessage(
+                    type=WSMessageType.TOOL_CALL,
+                    payload=ToolCallPayload(
+                        tool_name=event.get("tool_name", ""),
+                        arguments=event.get("arguments", {}),
+                        call_id=event.get("call_id", ""),
+                    ).model_dump(),
+                )
+            )
+            await manager.broadcast(
+                WSMessage(
+                    type=WSMessageType.TOOL_RESULT,
+                    payload=ToolResultPayload(
+                        call_id=event.get("call_id", ""),
+                        result=event.get("result"),
+                        error=event.get("error"),
+                    ).model_dump(),
+                )
+            )
 
     if hasattr(core, "set_tool_event_callback"):
         core.set_tool_event_callback(tool_event_handler)

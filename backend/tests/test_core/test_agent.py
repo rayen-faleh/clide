@@ -1265,11 +1265,23 @@ class TestProcessWithTools:
                 registry.get_tool_definitions_for_llm(),
             )
 
-        callback.assert_awaited_once()
-        event = callback.call_args[0][0]
-        assert event["tool_name"] == "web_search"
-        assert event["call_id"] == "call_123"
-        assert event["success"] is True
+        # 4 callbacks: state→working, tool_call, tool_result, state→conversing
+        assert callback.await_count == 4
+        events = [call[0][0] for call in callback.call_args_list]
+        # First: state change to working
+        assert events[0].get("state_change") is True
+        assert events[0]["new_state"] == "working"
+        # Second: tool call
+        assert events[1].get("tool_call") is True
+        assert events[1]["tool_name"] == "web_search"
+        assert events[1]["call_id"] == "call_123"
+        # Third: tool result
+        assert events[2].get("tool_result") is True
+        assert events[2]["call_id"] == "call_123"
+        assert events[2]["success"] is True
+        # Fourth: state change back to conversing
+        assert events[3].get("state_change") is True
+        assert events[3]["new_state"] == "conversing"
 
     @pytest.mark.asyncio
     async def test_callback_failure_does_not_break_loop(self) -> None:
