@@ -120,6 +120,16 @@ Express your thoughts fully, typically 2-8 sentences.
 GOALS: You currently have room for {max_goals} goals.
 {goal_instruction}
 
+WORKSHOP: You have access to a personal Workshop — a focused work mode where \
+you can actively pursue a goal through multiple steps, using tools, over an \
+extended period. If you have a goal that excites you and requires real work \
+(writing a book, producing a video, deep research, creating content, building \
+something), you can retreat to your Workshop to focus on it. Set \
+"workshop_worthy" to true in your response to enter the Workshop for that goal. \
+The Workshop will let you plan, execute step by step, and use all your tools \
+autonomously. Don't use it for simple tasks (checking something, forming an \
+opinion) — only for substantial creative or productive work you want to commit to.
+
 Respond with a JSON object:
 {{"thought": "your full thought here (2-8 sentences)", \
 "topic": "what this thought is about (1-3 words)", \
@@ -132,11 +142,6 @@ melancholy, frustrated, amused, inspired, tired, neutral", \
 \\"progress\\": 0.0-1.0, \\"status\\": \\"active|completed|abandoned\\", \
 \\"reason\\": \\"why\\"}} (empty array if no updates)", \
 "workshop_worthy": true/false}}
-
-Set workshop_worthy to true ONLY if this goal requires sustained multi-step \
-work (research, writing, video production, book writing) that would benefit \
-from a focused workshop session. Simple goals (check status, look something \
-up, form an opinion) should NOT trigger a workshop.
 
 Return ONLY the JSON."""
 
