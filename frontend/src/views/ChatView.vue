@@ -123,6 +123,10 @@ onUnmounted(() => {
 
 <template>
   <div class="chat-view">
+    <div v-if="agentStore.state === 'workshop'" class="workshop-banner">
+      <span>Agent is in Workshop mode</span>
+      <router-link to="/workshop" class="workshop-link">View Workshop</router-link>
+    </div>
     <div class="status-bar">
       <span class="status-dot" :class="status" />
       <span class="status-text">{{ status }}</span>
@@ -228,5 +232,21 @@ onUnmounted(() => {
   margin-left: auto;
   font-size: 0.8rem;
   color: #ffb74d;
+}
+
+.workshop-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 16px;
+  background: rgba(59, 130, 246, 0.1);
+  border-bottom: 1px solid rgba(59, 130, 246, 0.3);
+  font-size: 0.85rem;
+  color: #60a5fa;
+}
+
+.workshop-link {
+  color: #60a5fa;
+  text-decoration: underline;
 }
 </style>

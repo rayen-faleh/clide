@@ -18,6 +18,11 @@ const router = createRouter({
       component: () => import('@/views/DashboardView.vue'),
     },
     {
+      path: '/workshop',
+      name: 'workshop',
+      component: () => import('@/views/WorkshopView.vue'),
+    },
+    {
       path: '/settings',
       name: 'settings',
       component: () => import('@/views/SettingsView.vue'),
