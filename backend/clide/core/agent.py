@@ -488,6 +488,110 @@ class AgentCore:
                 logger.warning("Failed to load conversation history", exc_info=True)
             self._history_loaded = True
 
+        # Handle /workshop command
+        if content.strip().startswith("/workshop "):
+            goal_desc = content.strip()[len("/workshop ") :].strip()
+            if goal_desc:
+                logger.info("User triggered workshop via command: %s", goal_desc[:100])
+                goal_id = "user-workshop"
+                if self.goal_manager:
+                    try:
+                        goal = await self.goal_manager.create(goal_desc)
+                        goal_id = goal.id
+                    except Exception:
+                        logger.warning("Failed to create goal for workshop", exc_info=True)
+
+                # Set up workshop broadcast using existing callback
+                if self._tool_event_callback:
+                    existing_cb = self._tool_event_callback
+
+                    async def workshop_chat_broadcast(event: dict[str, Any]) -> None:
+                        """Route workshop events through WebSocket."""
+                        from clide.api.schemas import (
+                            WorkshopDialoguePayload,
+                            WorkshopEndedPayload,
+                            WorkshopPlanPayload,
+                            WorkshopStepUpdatePayload,
+                            WSMessage,
+                            WSMessageType,
+                        )
+                        from clide.api.websocket import manager as ws_manager
+
+                        if event.get("workshop_dialogue"):
+                            await ws_manager.broadcast(
+                                WSMessage(
+                                    type=WSMessageType.WORKSHOP_DIALOGUE,
+                                    payload=WorkshopDialoguePayload(
+                                        session_id=event["session_id"],
+                                        content=event["content"],
+                                    ).model_dump(),
+                                )
+                            )
+                        elif event.get("workshop_plan"):
+                            await ws_manager.broadcast(
+                                WSMessage(
+                                    type=WSMessageType.WORKSHOP_PLAN,
+                                    payload=WorkshopPlanPayload(
+                                        session_id=event["session_id"],
+                                        objective=event["objective"],
+                                        approach=event["approach"],
+                                        steps=event["steps"],
+                                    ).model_dump(),
+                                )
+                            )
+                        elif event.get("workshop_step_update"):
+                            await ws_manager.broadcast(
+                                WSMessage(
+                                    type=WSMessageType.WORKSHOP_STEP_UPDATE,
+                                    payload=WorkshopStepUpdatePayload(
+                                        session_id=event["session_id"],
+                                        step_index=event["step_index"],
+                                        status=event["status"],
+                                        result_summary=event.get("result_summary", ""),
+                                    ).model_dump(),
+                                )
+                            )
+                        elif event.get("workshop_ended"):
+                            await ws_manager.broadcast(
+                                WSMessage(
+                                    type=WSMessageType.WORKSHOP_ENDED,
+                                    payload=WorkshopEndedPayload(
+                                        session_id=event["session_id"],
+                                        status=event["status"],
+                                        summary=event.get("summary", ""),
+                                    ).model_dump(),
+                                )
+                            )
+                        elif event.get("tool_call") or event.get("tool_result"):
+                            await existing_cb(event)
+
+                    self.set_tool_event_callback(workshop_chat_broadcast)
+
+                # Broadcast workshop started
+                from clide.api.schemas import (
+                    WorkshopStartedPayload,
+                    WSMessage,
+                    WSMessageType,
+                )
+                from clide.api.websocket import manager as ws_manager
+
+                await ws_manager.broadcast(
+                    WSMessage(
+                        type=WSMessageType.WORKSHOP_STARTED,
+                        payload=WorkshopStartedPayload(
+                            session_id="pending",
+                            goal_description=goal_desc,
+                        ).model_dump(),
+                    )
+                )
+
+                success = await self.enter_workshop(goal_id, goal_desc)
+                if success:
+                    yield f"Entering the Workshop to work on: {goal_desc}"
+                else:
+                    yield "I can't enter the Workshop right now — I might already be in one."
+                return
+
         # Handle workshop interruption
         _was_in_workshop = False
         if self.state_machine.state == AgentState.WORKSHOP:
