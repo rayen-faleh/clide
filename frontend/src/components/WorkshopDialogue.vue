@@ -1,5 +1,7 @@
 <script setup lang="ts">
 import { ref, watch, nextTick } from 'vue'
+import { marked } from 'marked'
+import DOMPurify from 'dompurify'
 import type { DialogueEntry } from '@/stores/workshop'
 
 const props = defineProps<{
@@ -7,6 +9,36 @@ const props = defineProps<{
 }>()
 
 const container = ref<HTMLElement | null>(null)
+
+marked.setOptions({
+  breaks: true,
+  gfm: true,
+})
+
+function renderMarkdown(content: string): string {
+  const raw = marked.parse(content) as string
+  return DOMPurify.sanitize(raw, {
+    ALLOWED_TAGS: [
+      'p',
+      'br',
+      'strong',
+      'em',
+      'code',
+      'pre',
+      'ul',
+      'ol',
+      'li',
+      'blockquote',
+      'a',
+      'h1',
+      'h2',
+      'h3',
+      'h4',
+      'del',
+    ],
+    ALLOWED_ATTR: ['href', 'target', 'rel'],
+  })
+}
 
 watch(
   () => props.entries.length,
@@ -29,7 +61,9 @@ watch(
       class="dialogue-entry"
       :class="{ 'tool-event': entry.isToolEvent }"
     >
-      <span class="dialogue-content">{{ entry.content }}</span>
+      <span v-if="entry.isToolEvent" class="dialogue-content">{{ entry.content }}</span>
+      <!-- eslint-disable-next-line vue/no-v-html -->
+      <span v-else class="dialogue-content md-content" v-html="renderMarkdown(entry.content)" />
     </div>
   </div>
 </template>
@@ -67,5 +101,51 @@ watch(
 .dialogue-content {
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+.md-content :deep(p) {
+  margin: 0 0 0.5em;
+}
+.md-content :deep(p:last-child) {
+  margin-bottom: 0;
+}
+.md-content :deep(code) {
+  background: rgba(0, 0, 0, 0.2);
+  padding: 1px 4px;
+  border-radius: 3px;
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  font-size: 0.9em;
+}
+.md-content :deep(pre) {
+  background: rgba(0, 0, 0, 0.3);
+  padding: 8px 12px;
+  border-radius: 6px;
+  overflow-x: auto;
+  margin: 0.5em 0;
+}
+.md-content :deep(pre code) {
+  background: none;
+  padding: 0;
+}
+.md-content :deep(blockquote) {
+  border-left: 3px solid rgba(255, 255, 255, 0.2);
+  margin: 0.5em 0;
+  padding-left: 12px;
+  opacity: 0.85;
+}
+.md-content :deep(ul),
+.md-content :deep(ol) {
+  margin: 0.5em 0;
+  padding-left: 1.5em;
+}
+.md-content :deep(a) {
+  color: #60a5fa;
+  text-decoration: underline;
+}
+.md-content :deep(strong) {
+  font-weight: 700;
+}
+.md-content :deep(del) {
+  opacity: 0.6;
 }
 </style>

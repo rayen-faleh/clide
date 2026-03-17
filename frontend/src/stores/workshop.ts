@@ -114,6 +114,7 @@ export const useWorkshopStore = defineStore('workshop', () => {
     }
   }
 
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   function handleWorkshopEnded(msg: WSMessage) {
     // Clear session when workshop ends (completed, abandoned, or discarded)
     session.value = null
