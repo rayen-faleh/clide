@@ -1169,9 +1169,13 @@ class AgentCore:
 
         from clide.autonomy.workshop import WorkshopRunner
 
-        personality_context = ""
+        # Build full personality context: system prompt + character traits/mood
+        personality_parts = []
+        if self.system_prompt:
+            personality_parts.append(self.system_prompt)
         if self.character:
-            personality_context = self.character.build_personality_prompt()
+            personality_parts.append(self.character.build_personality_prompt())
+        personality_context = "\n\n".join(personality_parts)
 
         tools_context = ""
         tool_definitions: list[dict[str, Any]] = []

@@ -59,6 +59,7 @@ class MCPClient:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=env,
+                limit=1024 * 1024,  # 1MB buffer for large MCP responses
             )
 
             self._reader_task = asyncio.create_task(self._read_responses())

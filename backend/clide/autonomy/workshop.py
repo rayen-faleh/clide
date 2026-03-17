@@ -386,6 +386,10 @@ class WorkshopRunner:
             if self._cancelled:
                 break
 
+            # Rate limit: brief pause between LLM calls to avoid API throttling
+            if _iteration > 0:
+                await asyncio.sleep(1)
+
             try:
                 response = await complete_with_tools(
                     messages, self.llm_config, self.tool_definitions
