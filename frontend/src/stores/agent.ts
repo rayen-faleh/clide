@@ -204,17 +204,20 @@ export const useAgentStore = defineStore('agent', () => {
       return
     }
     const payload = msg.payload as unknown as ToolResultPayload
-    const event = [...messages.value]
-      .reverse()
-      .find(
-        (m): m is ToolEvent => 'type' in m && m.type === 'tool' && m.call_id === payload.call_id,
-      )
-    if (event) {
-      event.result = payload.result
-      event.error = payload.error
-      event.status = payload.error ? 'error' : 'success'
-      persistToolEvents(messages.value)
+    // Find matching tool call in-place (reverse loop, no array copy)
+    for (let i = messages.value.length - 1; i >= 0; i--) {
+      const m = messages.value[i]
+      if ('type' in m && m.type === 'tool' && (m as ToolEvent).call_id === payload.call_id) {
+        const event = m as ToolEvent
+        event.result = payload.result
+        event.error = payload.error
+        event.status = payload.error ? 'error' : 'success'
+        persistToolEvents(messages.value)
+        return
+      }
     }
+    // No matching call found — likely out-of-order or already matched
+    console.warn('Tool result received with no matching call:', payload.call_id)
   }
 
   function handleToolCheckpoint(msg: WSMessage) {
