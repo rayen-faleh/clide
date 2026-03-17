@@ -28,7 +28,16 @@ export interface ToolEvent {
   timestamp: Date
 }
 
-export type MessageItem = ChatEntry | ToolEvent
+export interface CheckpointEntry {
+  id: string
+  type: 'checkpoint'
+  content: string
+  phase: number
+  totalPhases: number
+  timestamp: Date
+}
+
+export type MessageItem = ChatEntry | ToolEvent | CheckpointEntry
 
 export interface ThoughtToolEvent {
   tool_name: string
@@ -44,6 +53,31 @@ export interface ThoughtEntry {
   thoughtType?: string
   timestamp: string
   toolEvents?: ThoughtToolEvent[]
+}
+
+const TOOL_EVENTS_KEY = 'clide_tool_events'
+
+function persistToolEvents(messages: MessageItem[]): void {
+  const toolEvents = messages
+    .filter((m): m is ToolEvent => 'type' in m && m.type === 'tool')
+    .slice(-100)
+  try {
+    localStorage.setItem(TOOL_EVENTS_KEY, JSON.stringify(toolEvents))
+  } catch (e) {
+    console.warn('Failed to persist tool events:', e)
+  }
+}
+
+function loadPersistedToolEvents(): ToolEvent[] {
+  try {
+    const raw = localStorage.getItem(TOOL_EVENTS_KEY)
+    if (!raw) return []
+    const events = JSON.parse(raw) as ToolEvent[]
+    return events.map((e) => ({ ...e, timestamp: new Date(e.timestamp) }))
+  } catch (e) {
+    console.warn('Failed to load persisted tool events:', e)
+    return []
+  }
 }
 
 export const useAgentStore = defineStore('agent', () => {
@@ -142,6 +176,7 @@ export const useAgentStore = defineStore('agent', () => {
       timestamp: new Date(),
     }
     messages.value.push(event)
+    persistToolEvents(messages.value)
   }
 
   function handleToolResult(msg: WSMessage) {
@@ -159,12 +194,51 @@ export const useAgentStore = defineStore('agent', () => {
       event.result = payload.result
       event.error = payload.error
       event.status = payload.error ? 'error' : 'success'
+      persistToolEvents(messages.value)
+    }
+  }
+
+  function handleToolCheckpoint(msg: WSMessage) {
+    const payload = msg.payload as { content: string; phase: number; total_phases: number }
+    messages.value.push({
+      id: crypto.randomUUID(),
+      type: 'checkpoint',
+      content: payload.content,
+      phase: payload.phase,
+      totalPhases: payload.total_phases,
+      timestamp: new Date(),
+    })
+  }
+
+  function restoreToolEvents(): void {
+    const persisted = loadPersistedToolEvents()
+    for (const event of persisted) {
+      // Avoid duplicates
+      const exists = messages.value.some(
+        (m) => 'type' in m && m.type === 'tool' && (m as ToolEvent).call_id === event.call_id,
+      )
+      if (exists) continue
+
+      const insertIndex = messages.value.findIndex((m) => {
+        const msgTime = 'timestamp' in m ? new Date(m.timestamp) : new Date(0)
+        return msgTime > event.timestamp
+      })
+      if (insertIndex === -1) {
+        messages.value.push(event)
+      } else {
+        messages.value.splice(insertIndex, 0, event)
+      }
     }
   }
 
   function clearMessages() {
     messages.value = []
     isStreaming.value = false
+    try {
+      localStorage.removeItem(TOOL_EVENTS_KEY)
+    } catch (e) {
+      console.warn('Failed to clear tool events from localStorage:', e)
+    }
   }
 
   return {
@@ -185,6 +259,8 @@ export const useAgentStore = defineStore('agent', () => {
     updateLastAssistant,
     handleToolCall,
     handleToolResult,
+    handleToolCheckpoint,
+    restoreToolEvents,
     clearMessages,
   }
 })

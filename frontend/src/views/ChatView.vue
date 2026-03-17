@@ -7,6 +7,7 @@ import type { WSMessage } from '@/types/messages'
 import ChatMessage from '@/components/ChatMessage.vue'
 import ChatInput from '@/components/ChatInput.vue'
 import ToolCard from '@/components/ToolCard.vue'
+import ToolCheckpoint from '@/components/ToolCheckpoint.vue'
 
 const { status, connect, send, on, off } = useWebSocket()
 const { messages, isStreaming, sendMessage, handleResponseChunk } = useChat(send)
@@ -53,6 +54,11 @@ function handleToolResult(msg: WSMessage) {
   agentStore.handleToolResult(msg)
 }
 
+function handleCheckpoint(msg: WSMessage) {
+  agentStore.handleToolCheckpoint(msg)
+  scrollToBottom()
+}
+
 onMounted(async () => {
   // Load persisted history if store is empty
   if (agentStore.messages.length === 0) {
@@ -73,6 +79,9 @@ onMounted(async () => {
     } catch (e) {
       console.error('Failed to load chat history:', e)
     }
+
+    // Restore persisted tool events from localStorage
+    agentStore.restoreToolEvents()
   }
 
   on('chat_response_chunk', handleResponseChunk)
@@ -81,6 +90,7 @@ onMounted(async () => {
   on('thought', handleThought)
   on('tool_call', handleToolCall)
   on('tool_result', handleToolResult)
+  on('tool_checkpoint', handleCheckpoint)
 
   watch(status, (newStatus) => {
     agentStore.setConnected(newStatus === 'connected')
@@ -96,6 +106,7 @@ onUnmounted(() => {
   off('thought', handleThought)
   off('tool_call', handleToolCall)
   off('tool_result', handleToolResult)
+  off('tool_checkpoint', handleCheckpoint)
 })
 </script>
 
@@ -111,6 +122,10 @@ onUnmounted(() => {
       </div>
       <template v-for="item in messages" :key="item.id">
         <ToolCard v-if="'type' in item && item.type === 'tool'" :event="item" />
+        <ToolCheckpoint
+          v-else-if="'type' in item && item.type === 'checkpoint'"
+          :checkpoint="item"
+        />
         <ChatMessage v-else :message="item" />
       </template>
     </div>

@@ -20,6 +20,7 @@ class WSMessageType(StrEnum):
     MEMORY_UPDATE = "memory_update"
     TOOL_CALL = "tool_call"
     TOOL_RESULT = "tool_result"
+    TOOL_CHECKPOINT = "tool_checkpoint"
     STATE_CHANGE = "state_change"
     STATUS = "status"
     ERROR = "error"

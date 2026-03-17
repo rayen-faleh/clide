@@ -149,6 +149,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
             )
             from clide.api.websocket import manager as ws_manager
 
+            # Handle checkpoint events during thinking
+            if event.get("checkpoint"):
+                logger.info("Thinking checkpoint: %s", event.get("content", "")[:100])
+                return
+
             await ws_manager.broadcast(
                 WSMessage(
                     type=WSMessageType.TOOL_CALL,

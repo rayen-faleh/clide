@@ -7,6 +7,7 @@ export type WSMessageType =
   | 'memory_update'
   | 'tool_call'
   | 'tool_result'
+  | 'tool_checkpoint'
   | 'state_change'
   | 'status'
   | 'error'

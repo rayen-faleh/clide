@@ -16,6 +16,7 @@ from clide.api.schemas import (
     ErrorPayload,
     StateChangePayload,
     ToolCallPayload,
+    ToolCheckpointPayload,
     ToolResultPayload,
     WSMessage,
     WSMessageType,
@@ -198,7 +199,21 @@ async def _handle_chat_message(
 
     # Set tool event callback to broadcast to all clients
     async def tool_event_handler(event: dict[str, Any]) -> None:
-        """Broadcast tool call and result events to all connected clients."""
+        """Broadcast tool call, result, and checkpoint events."""
+        # Handle checkpoint events from phased tool execution
+        if event.get("checkpoint"):
+            await manager.broadcast(
+                WSMessage(
+                    type=WSMessageType.TOOL_CHECKPOINT,
+                    payload=ToolCheckpointPayload(
+                        content=event.get("content", ""),
+                        phase=event.get("phase", 0),
+                        total_phases=event.get("total_phases", 3),
+                    ).model_dump(),
+                )
+            )
+            return
+
         # Broadcast tool call
         await manager.broadcast(
             WSMessage(
