@@ -209,8 +209,18 @@ onUnmounted(() => {
 .input-row {
   display: flex;
   align-items: flex-end;
-  gap: 8px;
-  padding: 0 16px 16px;
+  gap: 0;
+}
+
+.input-row :deep(.chat-input) {
+  flex: 1;
+  border-top: 1px solid var(--color-border, #374151);
+}
+
+.input-row .pizza-reward {
+  padding: 12px 12px 12px 0;
+  background-color: var(--color-input-bg, #1f2937);
+  border-top: 1px solid var(--color-border, #374151);
 }
 
 .pizza-counter {
