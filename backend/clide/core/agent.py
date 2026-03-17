@@ -68,6 +68,7 @@ class AgentCore:
         self.born_at = born_at
         self.tool_registry = tool_registry
         self._tool_event_callback: Any = None  # Set by websocket handler
+        self._workshop_runner: Any = None  # WorkshopRunner when in workshop mode
         self._recent_topics: list[str] = []  # Track last N thought topics
         self._topic_history_size = 6  # Remember last 6 topics
         self.tool_phase_size = 10  # Tool calls per phase before checkpoint
@@ -77,6 +78,7 @@ class AgentCore:
         self._persona_manager: Any = None  # Set from main.py
         self._persona_settings: Any = None  # PersonaSettings from config
         self._agent_name: str = "Clide"
+        self._last_thought_metadata: dict[str, str] = {}
 
     @staticmethod
     def _format_age(dt: datetime) -> str:
@@ -486,6 +488,14 @@ class AgentCore:
                 logger.warning("Failed to load conversation history", exc_info=True)
             self._history_loaded = True
 
+        # Handle workshop interruption
+        _was_in_workshop = False
+        if self.state_machine.state == AgentState.WORKSHOP:
+            _was_in_workshop = True
+            if self._workshop_runner:
+                self._workshop_runner.pause()
+            self.state_machine.transition(AgentState.CONVERSING, "user interrupted workshop")
+
         # Transition to CONVERSING if currently IDLE
         if self.state_machine.state == AgentState.IDLE:
             logger.info("Agent state: IDLE -> CONVERSING (user message received)")
@@ -584,8 +594,20 @@ class AgentCore:
         # Summarize or trim history if needed
         await self._maybe_summarize_history()
 
-        # Transition back to IDLE immediately (don't block on memory/character)
-        if self.state_machine.state == AgentState.CONVERSING:
+        # Auto-resume workshop if it was paused
+        if (
+            _was_in_workshop
+            and self._workshop_runner
+            and self._workshop_runner.session.status == "paused"
+        ):
+            self._workshop_runner.resume()
+            self.state_machine.transition(
+                AgentState.WORKSHOP,
+                "resuming workshop after conversation",
+            )
+            self._track_task(self._run_workshop())
+        elif self.state_machine.state == AgentState.CONVERSING:
+            # Normal transition to IDLE
             logger.info("Agent state: CONVERSING -> IDLE (response complete)")
             self.state_machine.transition(AgentState.IDLE, "response complete")
 
@@ -1024,6 +1046,7 @@ class AgentCore:
             self._track_task(self._post_thought_tasks(thought, mood, intensity))
 
             logger.info("Thought generated (%s): %s", thought_type, thought.content[:100])
+            self._last_thought_metadata = thought.metadata
             return thought.content, mood, intensity, thought.thought_type
 
         except Exception:
@@ -1034,6 +1057,73 @@ class AgentCore:
             if self.state_machine.state == AgentState.THINKING:
                 logger.info("Agent state: THINKING -> IDLE (thinking cycle complete)")
                 self.state_machine.transition(AgentState.IDLE, "thinking cycle complete")
+
+    async def enter_workshop(self, goal_id: str, goal_description: str) -> bool:
+        """Enter workshop mode for a goal."""
+        if not self.state_machine.can_transition(AgentState.WORKSHOP):
+            return False
+
+        from clide.autonomy.workshop import WorkshopRunner
+
+        personality_context = ""
+        if self.character:
+            personality_context = self.character.build_personality_prompt()
+
+        tools_context = ""
+        tool_definitions: list[dict[str, Any]] = []
+        if self.tool_registry:
+            tool_definitions = self.tool_registry.get_tool_definitions_for_llm()
+            tools_context = (
+                ", ".join(t["function"]["name"] for t in tool_definitions)
+                if tool_definitions
+                else "none"
+            )
+
+        self.state_machine.transition(AgentState.WORKSHOP, f"workshop: {goal_description}")
+
+        self._workshop_runner = WorkshopRunner(
+            llm_config=self.llm_config,
+            goal_id=goal_id,
+            goal_description=goal_description,
+            personality_context=personality_context,
+            tools_context=tools_context,
+            tool_definitions=tool_definitions,
+            broadcast_fn=self._tool_event_callback,
+            tool_execute_fn=(self.tool_registry.execute_tool if self.tool_registry else None),
+        )
+
+        self._track_task(self._run_workshop())
+        return True
+
+    async def _run_workshop(self) -> None:
+        """Background task for workshop execution."""
+        if not self._workshop_runner:
+            return
+        try:
+            await self._workshop_runner.run()
+        except Exception:
+            logger.exception("Workshop execution failed")
+        finally:
+            if self.state_machine.state == AgentState.WORKSHOP:
+                self.state_machine.transition(AgentState.IDLE, "workshop complete")
+            # Clean up
+            self._workshop_runner = None
+
+    async def discard_workshop(self) -> None:
+        """User-triggered workshop cancellation."""
+        if self._workshop_runner:
+            self._workshop_runner.cancel()
+            # Give it a moment to clean up
+            await asyncio.sleep(0.5)
+            self._workshop_runner = None
+        if self.state_machine.state == AgentState.WORKSHOP:
+            self.state_machine.transition(AgentState.IDLE, "workshop discarded by user")
+
+    def get_workshop_session(self) -> Any:
+        """Get the current workshop session, if any."""
+        if self._workshop_runner:
+            return self._workshop_runner.session
+        return None
 
     def _load_tool_skills(self) -> dict[str, str]:
         """Load tool skill files from the skills/ directory."""

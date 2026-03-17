@@ -18,6 +18,8 @@ from clide.api.goal_routes import goal_router, set_goal_manager
 from clide.api.memory_routes import cost_router, memory_router, set_amem, set_cost_tracker
 from clide.api.routes import router
 from clide.api.websocket import set_agent_core, ws_router
+from clide.api.workshop_routes import set_agent_core as set_workshop_agent_core
+from clide.api.workshop_routes import workshop_router
 from clide.autonomy.goals import GoalManager
 from clide.autonomy.scheduler import ThinkingScheduler
 from clide.character.character import Character
@@ -111,6 +113,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     from clide.api.reward_routes import set_agent_core as set_reward_agent_core
 
     set_reward_agent_core(agent_core)
+    set_workshop_agent_core(agent_core)
 
     # Persona drift mitigation
     from clide.core.persona import PersonaManager
@@ -147,6 +150,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     # Autonomy scheduler
     scheduler = ThinkingScheduler(
         interval_seconds=settings.agent.states.thinking.interval_seconds,
+        agent_state_fn=lambda: agent_core.state_machine.state,
     )
 
     # Define the thinking callback
@@ -197,6 +201,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
             thought_content, mood, intensity, thought_type = result
             # Late import to avoid circular imports
             from clide.api.schemas import (
+                AgentState,
                 MoodPayload,
                 ThoughtPayload,
                 WSMessage,
@@ -227,6 +232,101 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
                     ).model_dump(),
                 )
             )
+
+            # Check if thought is workshop-worthy
+            thought_meta = agent_core._last_thought_metadata
+            if (
+                thought_type == "goal_oriented"
+                and thought_meta.get("workshop_worthy") in ("true", "True")
+                and agent_core.state_machine.state == AgentState.IDLE
+            ):
+                new_goal = thought_meta.get("new_goal", "")
+                if new_goal:
+                    logger.info("Workshop-worthy goal detected: %s", new_goal)
+                    # Find or create the goal
+                    goal = None
+                    if goal_manager:
+                        existing = await goal_manager.find_by_description(new_goal)
+                        if existing:
+                            goal = existing
+                        else:
+                            goal = await goal_manager.create(new_goal)
+
+                    if goal:
+                        from clide.api.schemas import (
+                            WorkshopDialoguePayload,
+                            WorkshopEndedPayload,
+                            WorkshopPlanPayload,
+                            WorkshopStartedPayload,
+                            WorkshopStepUpdatePayload,
+                        )
+
+                        async def workshop_broadcast(
+                            event: dict[str, Any],
+                        ) -> None:
+                            """Route workshop events to WebSocket."""
+                            if event.get("workshop_dialogue"):
+                                await ws_manager.broadcast(
+                                    WSMessage(
+                                        type=WSMessageType.WORKSHOP_DIALOGUE,
+                                        payload=WorkshopDialoguePayload(
+                                            session_id=event["session_id"],
+                                            content=event["content"],
+                                        ).model_dump(),
+                                    )
+                                )
+                            elif event.get("workshop_plan"):
+                                await ws_manager.broadcast(
+                                    WSMessage(
+                                        type=WSMessageType.WORKSHOP_PLAN,
+                                        payload=WorkshopPlanPayload(
+                                            session_id=event["session_id"],
+                                            objective=event["objective"],
+                                            approach=event["approach"],
+                                            steps=event["steps"],
+                                        ).model_dump(),
+                                    )
+                                )
+                            elif event.get("workshop_step_update"):
+                                await ws_manager.broadcast(
+                                    WSMessage(
+                                        type=WSMessageType.WORKSHOP_STEP_UPDATE,
+                                        payload=WorkshopStepUpdatePayload(
+                                            session_id=event["session_id"],
+                                            step_index=event["step_index"],
+                                            status=event["status"],
+                                            result_summary=event.get("result_summary", ""),
+                                        ).model_dump(),
+                                    )
+                                )
+                            elif event.get("workshop_ended"):
+                                await ws_manager.broadcast(
+                                    WSMessage(
+                                        type=WSMessageType.WORKSHOP_ENDED,
+                                        payload=WorkshopEndedPayload(
+                                            session_id=event["session_id"],
+                                            status=event["status"],
+                                            summary=event.get("summary", ""),
+                                        ).model_dump(),
+                                    )
+                                )
+                            elif event.get("tool_call") or event.get("tool_result"):
+                                await thinking_tool_handler(event)
+
+                        agent_core.set_tool_event_callback(workshop_broadcast)
+
+                        await ws_manager.broadcast(
+                            WSMessage(
+                                type=WSMessageType.WORKSHOP_STARTED,
+                                payload=WorkshopStartedPayload(
+                                    session_id="pending",
+                                    goal_description=new_goal,
+                                ).model_dump(),
+                            )
+                        )
+
+                        await agent_core.enter_workshop(goal.id, goal.description)
+                        return
 
     if settings.agent.states.thinking.interval_seconds > 0:
         scheduler.set_callback(thinking_callback)
@@ -274,6 +374,7 @@ def create_app() -> FastAPI:
     app.include_router(config_router)
     app.include_router(conversation_router)
     app.include_router(goal_router)
+    app.include_router(workshop_router)
 
     from clide.api.reward_routes import reward_router
 

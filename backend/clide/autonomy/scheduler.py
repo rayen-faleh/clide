@@ -22,9 +22,11 @@ class ThinkingScheduler:
         self,
         interval_seconds: float = 300,
         callback: Callable[[], Coroutine[Any, Any, None]] | None = None,
+        agent_state_fn: Callable[[], Any] | None = None,
     ) -> None:
         self.interval_seconds = interval_seconds
         self._callback = callback
+        self._agent_state_fn = agent_state_fn
         self._task: asyncio.Task[None] | None = None
         self._running = False
         self._cycle_count = 0
@@ -89,6 +91,15 @@ class ThinkingScheduler:
         """Main loop that fires the callback at intervals."""
         while self._running:
             try:
+                # Check if agent is in workshop mode
+                if self._agent_state_fn:
+                    current_state = self._agent_state_fn()
+                    if str(current_state) == "workshop":
+                        logger.info("Skipping thinking cycle - agent in workshop mode")
+                        self._skipped_count += 1
+                        await asyncio.sleep(self.interval_seconds)
+                        continue
+
                 if self._running and self._callback:
                     if self._thinking_in_progress:
                         logger.info("Skipping thinking cycle - previous cycle still in progress")
