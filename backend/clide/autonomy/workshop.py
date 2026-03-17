@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import uuid
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
@@ -183,7 +184,33 @@ class WorkshopRunner:
             response = await litellm.acompletion(**kwargs)
             text = str(response.choices[0].message.content or "")
 
-            data = _extract_json(text)
+            # Strip think tags (Mistral thinking models)
+            text = re.sub(r"</?think>", "", text).strip()
+
+            if not text:
+                logger.warning("Empty plan response from LLM")
+                return None
+
+            logger.debug("Plan response (%d chars): %s", len(text), text[:300])
+
+            try:
+                data = _extract_json(text)
+            except (json.JSONDecodeError, ValueError):
+                logger.warning("Failed to parse plan JSON, attempting regex fallback")
+                obj_match = re.search(r'"objective"\s*:\s*"([^"]*)"', text)
+                app_match = re.search(r'"approach"\s*:\s*"([^"]*)"', text)
+                if obj_match:
+                    data = {
+                        "objective": obj_match.group(1),
+                        "approach": app_match.group(1) if app_match else "",
+                        "steps": [],
+                    }
+                    step_matches = re.findall(r'"description"\s*:\s*"([^"]*)"', text)
+                    for desc in step_matches:
+                        data["steps"].append({"description": desc})
+                else:
+                    return None
+
             steps = []
             for s in data.get("steps", []):
                 steps.append(
@@ -240,7 +267,15 @@ class WorkshopRunner:
             response = await litellm.acompletion(**kwargs)
             text = str(response.choices[0].message.content or "")
 
-            data = _extract_json(text)
+            # Strip think tags
+            text = re.sub(r"</?think>", "", text).strip()
+
+            try:
+                data = _extract_json(text)
+            except (json.JSONDecodeError, ValueError):
+                logger.warning("Failed to parse step JSON, using raw text as dialogue")
+                data = {"inner_dialogue": text[:500], "action": "complete"}
+
             inner_dialogue = data.get("inner_dialogue", "Working on this step...")
             action = data.get("action", "complete")
 
