@@ -12,8 +12,13 @@ export type WSMessageType =
   | 'state_change'
   | 'status'
   | 'error'
+  | 'workshop_started'
+  | 'workshop_plan'
+  | 'workshop_dialogue'
+  | 'workshop_step_update'
+  | 'workshop_ended'
 
-export type AgentState = 'sleeping' | 'idle' | 'thinking' | 'conversing' | 'working'
+export type AgentState = 'sleeping' | 'idle' | 'thinking' | 'conversing' | 'working' | 'workshop'
 
 export interface WSMessage {
   type: WSMessageType
