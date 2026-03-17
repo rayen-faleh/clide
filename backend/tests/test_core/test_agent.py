@@ -169,8 +169,8 @@ class TestProcessMessageWithMemory:
         await asyncio.sleep(0)  # Let background task run
         amem.remember.assert_awaited_once()
         call_args = amem.remember.call_args
-        assert "User said: hello" in call_args[0][0]
-        assert "Hello there!" in call_args[0][0]
+        assert "They asked: hello" in call_args[0][0]
+        assert "I responded: Hello there!" in call_args[0][0]
         assert call_args[1]["metadata"] == {"type": "conversation"}
 
     @pytest.mark.asyncio

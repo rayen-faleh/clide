@@ -63,12 +63,21 @@ class CharacterSettings(BaseModel):
     base_traits: CharacterTraits = CharacterTraits()
 
 
+class PersonaSettings(BaseModel):
+    reinforcement_interval: int = 8  # Inject persona reminder every N user messages
+    persona_summary: str = ""  # Manual override; empty = auto-generate from system prompt
+    summarize_history: bool = True  # Use LLM-based summarization vs simple trim
+    history_summarize_threshold: int = 40  # Trigger summarization at this count
+    history_summary_keep_recent: int = 10  # Keep recent messages unsummarized
+
+
 class AgentSettings(BaseModel):
     name: str = "Clide"
     system_prompt: str = ""  # Empty = use default from prompts.py
     llm: LLMSettings = LLMSettings()
     states: StatesSettings = StatesSettings()
     character: CharacterSettings = CharacterSettings()
+    persona: PersonaSettings = PersonaSettings()
 
 
 # Project root: backend/clide/config/settings.py -> ../../.. -> project root

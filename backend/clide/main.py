@@ -112,6 +112,16 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
 
     set_reward_agent_core(agent_core)
 
+    # Persona drift mitigation
+    from clide.core.persona import PersonaManager
+
+    persona_manager = PersonaManager(llm_config, settings.agent.persona)
+    agent_core._persona_manager = persona_manager
+    agent_core._persona_settings = settings.agent.persona
+    agent_core._agent_name = settings.agent.name
+    # Pre-generate persona summary (uses one LLM call)
+    await persona_manager.get_summary(settings.agent.system_prompt or agent_core.system_prompt)
+
     # Tool registry
     tool_registry = ToolRegistry.from_yaml()
     connection_results = await tool_registry.connect_all()

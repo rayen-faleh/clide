@@ -73,6 +73,10 @@ class AgentCore:
         self.tool_phase_size = 10  # Tool calls per phase before checkpoint
         self.tool_max_phases = 3  # Maximum number of phases
         self._background_tasks: set[asyncio.Task[None]] = set()
+        # Persona drift mitigation
+        self._persona_manager: Any = None  # Set from main.py
+        self._persona_settings: Any = None  # PersonaSettings from config
+        self._agent_name: str = "Clide"
 
     @staticmethod
     def _format_age(dt: datetime) -> str:
@@ -113,6 +117,81 @@ class AgentCore:
         """
         if messages and messages[-1].get("role") == "assistant":
             messages.append({"role": "user", "content": "Continue."})
+
+    async def _build_messages_with_reinforcement(self, system: str) -> list[dict[str, Any]]:
+        """Build message list with periodic persona reinforcement.
+
+        Injects system-role persona reminders every N user messages
+        to combat attention decay (47% drift reduction per research).
+        """
+        messages: list[dict[str, Any]] = [{"role": "system", "content": system}]
+
+        # Get persona summary for reinforcement
+        persona_summary = ""
+        interval = 0
+        if self._persona_manager and self._persona_settings:
+            interval = self._persona_settings.reinforcement_interval
+            if interval > 0:
+                persona_summary = await self._persona_manager.get_summary(self.system_prompt)
+
+        if not persona_summary or interval <= 0:
+            messages.extend(self.conversation_history)
+            return messages
+
+        user_msg_count = 0
+        for msg in self.conversation_history:
+            if msg.get("role") == "user":
+                user_msg_count += 1
+                if user_msg_count > 0 and user_msg_count % interval == 0:
+                    messages.append(
+                        self._persona_manager.build_reinforcement_message(persona_summary)
+                    )
+            messages.append(msg)
+
+        return messages
+
+    async def _maybe_summarize_history(self) -> None:
+        """Summarize old conversation history if it exceeds the threshold."""
+        if not self._persona_settings:
+            # Fall back to simple trimming
+            if len(self.conversation_history) > self._max_history_length:
+                self.conversation_history = self.conversation_history[-self._max_history_length :]
+            return
+
+        threshold = self._persona_settings.history_summarize_threshold
+        keep_recent = self._persona_settings.history_summary_keep_recent
+
+        if len(self.conversation_history) <= threshold:
+            return
+
+        if not self._persona_settings.summarize_history or not self._persona_manager:
+            # Fall back to simple trimming
+            self.conversation_history = self.conversation_history[-self._max_history_length :]
+            return
+
+        # Split: old messages to summarize, recent to keep
+        old_messages = self.conversation_history[:-keep_recent]
+        recent_messages = self.conversation_history[-keep_recent:]
+
+        summary = await self._persona_manager.summarize_history(old_messages, self._agent_name)
+
+        if summary:
+            self.conversation_history = [
+                {
+                    "role": "system",
+                    "content": f"[Previous conversation summary: {summary}]",
+                },
+                *recent_messages,
+            ]
+            logger.info(
+                "Summarized %d messages into summary (%d chars), keeping %d recent",
+                len(old_messages),
+                len(summary),
+                len(recent_messages),
+            )
+        else:
+            # Fallback: simple trimming
+            self.conversation_history = self.conversation_history[-self._max_history_length :]
 
     async def _process_with_tools(
         self,
@@ -421,11 +500,8 @@ class AgentCore:
             reward_context=reward_context,
         )
 
-        # Build messages for LLM
-        messages: list[dict[str, Any]] = [
-            {"role": "system", "content": system},
-            *self.conversation_history,
-        ]
+        # Build messages for LLM (with persona reinforcement)
+        messages = await self._build_messages_with_reinforcement(system)
 
         # --- Response generation (tools or streaming) ---
         tool_definitions: list[dict[str, Any]] = []
@@ -471,9 +547,8 @@ class AgentCore:
             except Exception:
                 logger.warning("Failed to persist assistant message", exc_info=True)
 
-        # Trim history if needed
-        if len(self.conversation_history) > self._max_history_length:
-            self.conversation_history = self.conversation_history[-self._max_history_length :]
+        # Summarize or trim history if needed
+        await self._maybe_summarize_history()
 
         # Transition back to IDLE immediately (don't block on memory/character)
         if self.state_machine.state == AgentState.CONVERSING:
@@ -489,7 +564,8 @@ class AgentCore:
         if self.amem:
             try:
                 await self.amem.remember(
-                    f"User said: {content}\nClide responded: {full_response[:500]}",
+                    f"{self._agent_name}'s conversation — They asked: {content}\n"
+                    f"I responded: {full_response[:500]}",
                     metadata={"type": "conversation"},
                 )
             except Exception:
@@ -531,7 +607,8 @@ class AgentCore:
             try:
                 meta = getattr(thought, "metadata", {}) or {}
                 await self.amem.remember(
-                    f"Autonomous thought: {getattr(thought, 'content', str(thought))}",
+                    f"{self._agent_name}'s private thought: "
+                    f"{getattr(thought, 'content', str(thought))}",
                     metadata={
                         "type": "thought",
                         "source": "autonomous",
@@ -942,14 +1019,19 @@ class AgentCore:
         """Give virtual pizzas. Stores in memory and injects into conversation."""
         if self.amem:
             await self.amem.remember(
-                f"User rewarded you with {amount} virtual pizza(s): {reason}",
+                f"Someone gave me {amount} virtual pizza(s): {reason}",
                 metadata={"type": "reward", "amount": str(amount), "reason": reason},
             )
-        reward_msg = f"[I'm giving you {amount} virtual pizza(s) because: {reason}]"
-        self.conversation_history.append({"role": "user", "content": reward_msg})
+        # Use system role + in-character instruction (prevents persona drift)
+        reward_msg = (
+            f"[The user just rewarded you with {amount} virtual pizza(s) because: "
+            f"{reason}. Acknowledge this naturally in your character voice — "
+            f"don't break character.]"
+        )
+        self.conversation_history.append({"role": "system", "content": reward_msg})
         if self.conversation_store:
             try:
-                await self.conversation_store.add_message("user", reward_msg)
+                await self.conversation_store.add_message("system", reward_msg)
             except Exception:
                 logger.warning("Failed to persist reward message", exc_info=True)
         return await self._get_total_pizzas()

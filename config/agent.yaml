@@ -190,3 +190,9 @@ agent:
       humor: 0.8
       assertiveness: 0.75
       creativity: 0.75
+  persona:
+    reinforcement_interval: 8
+    persona_summary: ""
+    summarize_history: true
+    history_summarize_threshold: 40
+    history_summary_keep_recent: 10
