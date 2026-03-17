@@ -59,7 +59,6 @@ class MCPClient:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=env,
-                limit=1024 * 1024,  # 1MB buffer for large MCP responses
             )
 
             self._reader_task = asyncio.create_task(self._read_responses())
@@ -239,25 +238,43 @@ class MCPClient:
         await self._process.stdin.drain()
 
     async def _read_responses(self) -> None:
-        """Background task to read responses from the server."""
+        """Background task to read newline-delimited JSON responses from the server.
+
+        Uses chunked reading instead of readline() to handle arbitrarily large
+        MCP responses without hitting buffer limits.
+        """
         if not self._process or not self._process.stdout:
             return
 
+        buffer = b""
         while True:
             try:
-                line = await self._process.stdout.readline()
-                if not line:
-                    break
+                chunk = await self._process.stdout.read(65536)  # 64KB chunks
+                if not chunk:
+                    break  # EOF — process closed stdout
 
-                data = json.loads(line.decode().strip())
-                request_id = data.get("id")
+                buffer += chunk
 
-                if request_id and request_id in self._pending:
-                    future = self._pending.pop(request_id)
-                    if "error" in data:
-                        future.set_exception(Exception(str(data["error"])))
-                    else:
-                        future.set_result(data.get("result", {}))
+                # Process all complete lines (newline-delimited JSON)
+                while b"\n" in buffer:
+                    line, buffer = buffer.split(b"\n", 1)
+                    line = line.strip()
+                    if not line:
+                        continue
+
+                    try:
+                        data = json.loads(line.decode())
+                    except (json.JSONDecodeError, UnicodeDecodeError) as e:
+                        logger.debug("Invalid JSON from MCP server: %s", e)
+                        continue
+
+                    request_id = data.get("id")
+                    if request_id and request_id in self._pending:
+                        future = self._pending.pop(request_id)
+                        if "error" in data:
+                            future.set_exception(Exception(str(data["error"])))
+                        else:
+                            future.set_result(data.get("result", {}))
 
             except asyncio.CancelledError:
                 break
