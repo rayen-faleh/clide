@@ -108,6 +108,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     )
     set_agent_core(agent_core)
 
+    from clide.api.reward_routes import set_agent_core as set_reward_agent_core
+
+    set_reward_agent_core(agent_core)
+
     # Tool registry
     tool_registry = ToolRegistry.from_yaml()
     connection_results = await tool_registry.connect_all()
@@ -260,6 +264,10 @@ def create_app() -> FastAPI:
     app.include_router(config_router)
     app.include_router(conversation_router)
     app.include_router(goal_router)
+
+    from clide.api.reward_routes import reward_router
+
+    app.include_router(reward_router)
 
     return app
 

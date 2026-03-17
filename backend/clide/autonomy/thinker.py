@@ -87,6 +87,8 @@ disagree, wonder, speculate. This is your mind and yours alone.
 
 {recent_conversations}
 
+{reward_context}
+
 {memory_context}
 
 {goals_context}
@@ -142,6 +144,8 @@ These are your private thoughts. No one else can see them. Think freely.
 {mood_context}
 
 {recent_conversations}
+
+{reward_context}
 
 {memory_context}"""
 
@@ -227,6 +231,7 @@ class Thinker:
         tools_context: str = "",
         tool_results_context: str = "",
         recent_conversations: str = "",
+        reward_context: str = "",
         thought_history: str = "",
         system_prompt: str = "",
         max_goals: int = 5,
@@ -275,6 +280,7 @@ class Thinker:
                     if recent_conversations
                     else ""
                 ),
+                reward_context=(f"User appreciation:\n{reward_context}" if reward_context else ""),
                 memory_context=(
                     f"Recent memories:\n{memory_context}"
                     if memory_context
@@ -312,6 +318,7 @@ class Thinker:
                 recent_conversations=(
                     f"Recent conversations:\n{recent_conversations}" if recent_conversations else ""
                 ),
+                reward_context=(f"User appreciation:\n{reward_context}" if reward_context else ""),
                 memory_context=(
                     f"Recent memories:\n{memory_context}"
                     if memory_context

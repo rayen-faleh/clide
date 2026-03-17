@@ -8,6 +8,8 @@ import ChatMessage from '@/components/ChatMessage.vue'
 import ChatInput from '@/components/ChatInput.vue'
 import ToolCard from '@/components/ToolCard.vue'
 import ToolCheckpoint from '@/components/ToolCheckpoint.vue'
+import PizzaReward from '@/components/PizzaReward.vue'
+import RewardMessage from '@/components/RewardMessage.vue'
 
 const { status, connect, send, on, off } = useWebSocket()
 const { messages, isStreaming, sendMessage, handleResponseChunk } = useChat(send)
@@ -59,6 +61,11 @@ function handleCheckpoint(msg: WSMessage) {
   scrollToBottom()
 }
 
+function handleRewardGiven(msg: WSMessage) {
+  agentStore.handleRewardGiven(msg)
+  scrollToBottom()
+}
+
 onMounted(async () => {
   // Load persisted history if store is empty
   if (agentStore.messages.length === 0) {
@@ -91,6 +98,9 @@ onMounted(async () => {
   on('tool_call', handleToolCall)
   on('tool_result', handleToolResult)
   on('tool_checkpoint', handleCheckpoint)
+  on('reward_given', handleRewardGiven)
+
+  agentStore.loadRewardSummary()
 
   watch(status, (newStatus) => {
     agentStore.setConnected(newStatus === 'connected')
@@ -107,6 +117,7 @@ onUnmounted(() => {
   off('tool_call', handleToolCall)
   off('tool_result', handleToolResult)
   off('tool_checkpoint', handleCheckpoint)
+  off('reward_given', handleRewardGiven)
 })
 </script>
 
@@ -115,6 +126,9 @@ onUnmounted(() => {
     <div class="status-bar">
       <span class="status-dot" :class="status" />
       <span class="status-text">{{ status }}</span>
+      <span v-if="agentStore.totalPizzas > 0" class="pizza-counter">
+        &#127829; {{ agentStore.totalPizzas }}
+      </span>
     </div>
     <div ref="messagesContainer" class="messages">
       <div v-if="messages.length === 0" class="empty-state">
@@ -126,10 +140,14 @@ onUnmounted(() => {
           v-else-if="'type' in item && item.type === 'checkpoint'"
           :checkpoint="item"
         />
+        <RewardMessage v-else-if="'type' in item && item.type === 'reward'" :reward="item" />
         <ChatMessage v-else :message="item" />
       </template>
     </div>
-    <ChatInput :disabled="status !== 'connected' || isStreaming" @send="sendMessage" />
+    <div class="input-row">
+      <ChatInput :disabled="status !== 'connected' || isStreaming" @send="sendMessage" />
+      <PizzaReward @rewarded="scrollToBottom" />
+    </div>
   </div>
 </template>
 
@@ -186,5 +204,18 @@ onUnmounted(() => {
   justify-content: center;
   height: 100%;
   color: var(--color-text-secondary, #6b7280);
+}
+
+.input-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  padding: 0 16px 16px;
+}
+
+.pizza-counter {
+  margin-left: auto;
+  font-size: 0.8rem;
+  color: #ffb74d;
 }
 </style>

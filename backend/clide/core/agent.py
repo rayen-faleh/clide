@@ -410,6 +410,7 @@ class AgentCore:
             personality = self.character.build_personality_prompt()
 
         tool_skills = self._load_tool_skills()
+        reward_context = await self._gather_reward_context()
 
         system = build_system_prompt(
             self.system_prompt,
@@ -417,6 +418,7 @@ class AgentCore:
             memory_context=memory_context,
             agent_born_at=self.born_at,
             tool_skills=tool_skills if tool_skills else None,
+            reward_context=reward_context,
         )
 
         # Build messages for LLM
@@ -874,6 +876,7 @@ class AgentCore:
                 "opinions_context": opinions_context,
                 "tools_context": tools_context,
                 "recent_conversations": recent_conversation_context,
+                "reward_context": await self._gather_reward_context(),
                 "thought_history": thought_history,
                 "system_prompt": self.system_prompt,
                 "max_goals": max_goals if current_goal_count < max_goals else 0,
@@ -934,6 +937,57 @@ class AgentCore:
                 if content:
                     skills[tool_name] = content
         return skills
+
+    async def give_reward(self, amount: int, reason: str) -> int:
+        """Give virtual pizzas. Stores in memory and injects into conversation."""
+        if self.amem:
+            await self.amem.remember(
+                f"User rewarded you with {amount} virtual pizza(s): {reason}",
+                metadata={"type": "reward", "amount": str(amount), "reason": reason},
+            )
+        reward_msg = f"[I'm giving you {amount} virtual pizza(s) because: {reason}]"
+        self.conversation_history.append({"role": "user", "content": reward_msg})
+        if self.conversation_store:
+            try:
+                await self.conversation_store.add_message("user", reward_msg)
+            except Exception:
+                logger.warning("Failed to persist reward message", exc_info=True)
+        return await self._get_total_pizzas()
+
+    async def _get_total_pizzas(self) -> int:
+        """Sum all reward amounts from A-MEM."""
+        if not self.amem:
+            return 0
+        try:
+            rewards = await self.amem.get_recent_by_type("reward", limit=1000)
+            total = 0
+            for r in rewards:
+                with contextlib.suppress(ValueError, TypeError):
+                    total += int(r.metadata.get("amount", 0))
+            return total
+        except Exception:
+            logger.warning("Failed to get total pizzas", exc_info=True)
+            return 0
+
+    async def _gather_reward_context(self) -> str:
+        """Build reward context string for system prompt injection."""
+        if not self.amem:
+            return ""
+        try:
+            rewards = await self.amem.get_recent_by_type("reward", limit=5)
+            if not rewards:
+                return ""
+            total = await self._get_total_pizzas()
+            lines = [f"Total virtual pizzas earned: {total}"]
+            lines.append("Recent rewards from user:")
+            for r in rewards:
+                amt = r.metadata.get("amount", "?")
+                reason = r.metadata.get("reason", "no reason given")
+                lines.append(f"  - {amt} pizza(s): {reason} [{self._format_age(r.created_at)}]")
+            return "\n".join(lines)
+        except Exception:
+            logger.warning("Failed to gather reward context", exc_info=True)
+            return ""
 
     async def clear_history(self) -> None:
         """Clear conversation history."""

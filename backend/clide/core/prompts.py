@@ -18,6 +18,7 @@ def build_system_prompt(
     memory_context: str = "",
     agent_born_at: datetime | None = None,
     tool_skills: dict[str, str] | None = None,
+    reward_context: str = "",
 ) -> str:
     """Build the full system prompt with optional additions.
 
@@ -57,5 +58,8 @@ def build_system_prompt(
         for tool_name, skill_text in tool_skills.items():
             skills_lines.append(f"### {tool_name}\n{skill_text}\n")
         parts.append("\n".join(skills_lines))
+
+    if reward_context:
+        parts.append(reward_context)
 
     return "\n\n".join(parts)

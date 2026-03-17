@@ -21,6 +21,7 @@ class WSMessageType(StrEnum):
     TOOL_CALL = "tool_call"
     TOOL_RESULT = "tool_result"
     TOOL_CHECKPOINT = "tool_checkpoint"
+    REWARD_GIVEN = "reward_given"
     STATE_CHANGE = "state_change"
     STATUS = "status"
     ERROR = "error"
@@ -104,6 +105,21 @@ class ToolCheckpointPayload(BaseModel):
     content: str
     phase: int
     total_phases: int
+
+
+class RewardGivePayload(BaseModel):
+    """Payload for giving a reward."""
+
+    amount: int
+    reason: str
+
+
+class RewardEventPayload(BaseModel):
+    """Payload broadcast when reward is given."""
+
+    amount: int
+    reason: str
+    total_earned: int
 
 
 class ErrorPayload(BaseModel):

@@ -37,7 +37,16 @@ export interface CheckpointEntry {
   timestamp: Date
 }
 
-export type MessageItem = ChatEntry | ToolEvent | CheckpointEntry
+export interface RewardEntry {
+  id: string
+  type: 'reward'
+  amount: number
+  reason: string
+  totalEarned: number
+  timestamp: Date
+}
+
+export type MessageItem = ChatEntry | ToolEvent | CheckpointEntry | RewardEntry
 
 export interface ThoughtToolEvent {
   tool_name: string
@@ -86,6 +95,7 @@ export const useAgentStore = defineStore('agent', () => {
   const currentThought = ref<string | null>(null)
   const thoughts = ref<ThoughtEntry[]>([])
   const connected = ref(false)
+  const totalPizzas = ref(0)
 
   // Pending tool events that occur during thinking, before a thought arrives
   const pendingThinkingTools = ref<ThoughtToolEvent[]>([])
@@ -240,6 +250,34 @@ export const useAgentStore = defineStore('agent', () => {
     }
   }
 
+  function handleRewardGiven(msg: WSMessage) {
+    const payload = msg.payload as { amount: number; reason: string; total_earned: number }
+    totalPizzas.value = payload.total_earned
+    messages.value.push({
+      id: crypto.randomUUID(),
+      type: 'reward',
+      amount: payload.amount,
+      reason: payload.reason,
+      totalEarned: payload.total_earned,
+      timestamp: new Date(),
+    })
+    if (messages.value.length > 500) {
+      messages.value = messages.value.slice(-500)
+    }
+  }
+
+  async function loadRewardSummary(): Promise<void> {
+    try {
+      const res = await fetch('/api/rewards/summary')
+      if (res.ok) {
+        const data = (await res.json()) as { total?: number }
+        totalPizzas.value = data.total ?? 0
+      }
+    } catch (e) {
+      console.warn('Failed to load reward summary:', e)
+    }
+  }
+
   function clearMessages() {
     messages.value = []
     isStreaming.value = false
@@ -269,7 +307,10 @@ export const useAgentStore = defineStore('agent', () => {
     handleToolCall,
     handleToolResult,
     handleToolCheckpoint,
+    handleRewardGiven,
     restoreToolEvents,
+    loadRewardSummary,
+    totalPizzas,
     clearMessages,
   }
 })

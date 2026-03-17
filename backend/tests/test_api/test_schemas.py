@@ -36,6 +36,7 @@ class TestWSMessageType:
             "tool_call",
             "tool_result",
             "tool_checkpoint",
+            "reward_given",
             "state_change",
             "status",
             "error",
