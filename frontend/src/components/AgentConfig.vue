@@ -20,6 +20,13 @@ interface Config {
         creativity: number
       }
     }
+    persona?: {
+      reinforcement_interval: number
+      persona_summary: string
+      summarize_history: boolean
+      history_summarize_threshold: number
+      history_summary_keep_recent: number
+    }
     [key: string]: unknown
   }
 }
@@ -52,6 +59,14 @@ const budget = reactive({
   warning_threshold: props.config.agent.states.budget.warning_threshold,
 })
 
+const persona = reactive({
+  reinforcement_interval: props.config.agent.persona?.reinforcement_interval ?? 8,
+  persona_summary: props.config.agent.persona?.persona_summary ?? '',
+  summarize_history: props.config.agent.persona?.summarize_history ?? true,
+  history_summarize_threshold: props.config.agent.persona?.history_summarize_threshold ?? 40,
+  history_summary_keep_recent: props.config.agent.persona?.history_summary_keep_recent ?? 10,
+})
+
 watch(
   () => props.config,
   (newConfig) => {
@@ -61,6 +76,13 @@ watch(
     autonomy.max_consecutive_cycles = newConfig.agent.states.thinking.max_consecutive_cycles
     budget.daily_token_limit = newConfig.agent.states.budget.daily_token_limit
     budget.warning_threshold = newConfig.agent.states.budget.warning_threshold
+    if (newConfig.agent.persona) {
+      persona.reinforcement_interval = newConfig.agent.persona.reinforcement_interval
+      persona.persona_summary = newConfig.agent.persona.persona_summary
+      persona.summarize_history = newConfig.agent.persona.summarize_history
+      persona.history_summarize_threshold = newConfig.agent.persona.history_summarize_threshold
+      persona.history_summary_keep_recent = newConfig.agent.persona.history_summary_keep_recent
+    }
   },
   { deep: true },
 )
@@ -92,6 +114,7 @@ function handleSave() {
           warning_threshold: budget.warning_threshold,
         },
       },
+      persona: { ...persona },
     },
   }
   emit('save', updated)
@@ -169,6 +192,63 @@ function handleSave() {
           "
         />
         <span class="trait-value">{{ budget.warning_threshold.toFixed(2) }}</span>
+      </div>
+    </section>
+
+    <section class="config-section">
+      <h3 class="section-title">Persona Stability</h3>
+      <div class="field-row field-row--vertical">
+        <label class="field-label">Persona Summary</label>
+        <textarea
+          v-model="persona.persona_summary"
+          rows="3"
+          class="field-textarea"
+          placeholder="Leave empty for auto-generation from system prompt..."
+        />
+        <span class="field-hint"
+          >A 2-3 sentence reminder of the character's voice, injected periodically to prevent
+          drift.</span
+        >
+      </div>
+      <div class="field-row">
+        <label class="field-label">Reinforcement Interval</label>
+        <input
+          v-model.number="persona.reinforcement_interval"
+          type="number"
+          min="1"
+          max="50"
+          class="field-input"
+        />
+        <span class="field-hint">Inject persona reminder every N user messages</span>
+      </div>
+      <div class="field-row">
+        <label class="field-label">History Summarization</label>
+        <label class="toggle-label">
+          <input v-model="persona.summarize_history" type="checkbox" />
+          Summarize old messages instead of discarding
+        </label>
+      </div>
+      <div class="field-row">
+        <label class="field-label">Summarization Threshold</label>
+        <input
+          v-model.number="persona.history_summarize_threshold"
+          type="number"
+          min="10"
+          max="100"
+          class="field-input"
+        />
+        <span class="field-hint">Trigger summarization when history exceeds this count</span>
+      </div>
+      <div class="field-row">
+        <label class="field-label">Keep Recent Messages</label>
+        <input
+          v-model.number="persona.history_summary_keep_recent"
+          type="number"
+          min="5"
+          max="30"
+          class="field-input"
+        />
+        <span class="field-hint">Keep this many recent messages unsummarized</span>
       </div>
     </section>
 
@@ -325,5 +405,24 @@ function handleSave() {
 
 .save-btn:hover {
   background-color: var(--color-button-hover);
+}
+
+.field-hint {
+  font-size: 11px;
+  color: var(--color-text-secondary, #6b7280);
+  opacity: 0.7;
+}
+
+.toggle-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+}
+
+.toggle-label input[type='checkbox'] {
+  accent-color: var(--color-button, #2563eb);
 }
 </style>
