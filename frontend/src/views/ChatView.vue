@@ -208,17 +208,18 @@ onUnmounted(() => {
 
 .input-row {
   display: flex;
-  align-items: flex-end;
+  align-items: stretch;
   gap: 0;
 }
 
 .input-row :deep(.chat-input) {
   flex: 1;
-  border-top: 1px solid var(--color-border, #374151);
 }
 
-.input-row .pizza-reward {
-  padding: 12px 12px 12px 0;
+.input-row > :last-child {
+  display: flex;
+  align-items: center;
+  padding: 0 12px;
   background-color: var(--color-input-bg, #1f2937);
   border-top: 1px solid var(--color-border, #374151);
 }
