@@ -19,6 +19,61 @@ from clide.memory.processor import _extract_json
 
 logger = logging.getLogger(__name__)
 
+
+def _robust_extract_json(text: str) -> dict[str, Any]:
+    """Extract JSON from LLM response, handling markdown, think tags, truncation.
+
+    Strategy: strip tags/markdown, find first { and last }, try to parse.
+    If truncated (no closing }), attempt to close it and extract what we can.
+    """
+    # Strip think tags
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
+    text = re.sub(r"</?think>", "", text).strip()
+
+    # Try _extract_json first (handles code blocks etc.)
+    try:
+        return _extract_json(text)  # type: ignore[no-any-return]
+    except (json.JSONDecodeError, ValueError):
+        pass
+
+    # Find first { and last }
+    first_brace = text.find("{")
+    last_brace = text.rfind("}")
+
+    if first_brace == -1:
+        raise ValueError("No JSON object found in response")
+
+    if last_brace > first_brace:
+        # Normal case: we have both braces
+        candidate = text[first_brace : last_brace + 1]
+        try:
+            return json.loads(candidate)  # type: ignore[no-any-return]
+        except json.JSONDecodeError:
+            pass
+
+    # Truncated: no closing brace or parse failed
+    # Extract what we can with regex
+    result: dict[str, Any] = {}
+    for key in (
+        "inner_dialogue",
+        "objective",
+        "approach",
+        "action",
+        "review",
+        "skip_reason",
+        "result_summary",
+        "thought",
+    ):
+        match = re.search(rf'"{key}"\s*:\s*"((?:[^"\\]|\\.)*)"', text, re.DOTALL)
+        if match:
+            result[key] = match.group(1).replace("\\n", "\n").replace('\\"', '"')
+
+    if not result:
+        raise ValueError("Could not extract any fields from response")
+
+    return result
+
+
 WORKSHOP_PLAN_PROMPT = """You are about to enter your Workshop \
 -- a focused work session to pursue a specific goal. \
 Create a structured execution plan.
@@ -175,7 +230,7 @@ class WorkshopRunner:
             kwargs: dict[str, Any] = {
                 "model": model_name,
                 "messages": [{"role": "user", "content": prompt}],
-                "max_tokens": 1000,
+                "max_tokens": self.llm_config.max_tokens,
                 "stream": False,
             }
             if self.llm_config.api_base:
@@ -194,7 +249,7 @@ class WorkshopRunner:
             logger.debug("Plan response (%d chars): %s", len(text), text[:300])
 
             try:
-                data = _extract_json(text)
+                data = _robust_extract_json(text)
             except (json.JSONDecodeError, ValueError):
                 logger.warning("Failed to parse plan JSON, attempting regex fallback")
                 obj_match = re.search(r'"objective"\s*:\s*"([^"]*)"', text)
@@ -258,7 +313,7 @@ class WorkshopRunner:
             kwargs: dict[str, Any] = {
                 "model": model_name,
                 "messages": [{"role": "user", "content": prompt}],
-                "max_tokens": 500,
+                "max_tokens": self.llm_config.max_tokens,
                 "stream": False,
             }
             if self.llm_config.api_base:
@@ -267,14 +322,19 @@ class WorkshopRunner:
             response = await litellm.acompletion(**kwargs)
             text = str(response.choices[0].message.content or "")
 
-            # Strip think tags
-            text = re.sub(r"</?think>", "", text).strip()
-
             try:
-                data = _extract_json(text)
+                data = _robust_extract_json(text)
             except (json.JSONDecodeError, ValueError):
-                logger.warning("Failed to parse step JSON, using raw text as dialogue")
-                data = {"inner_dialogue": text[:500], "action": "complete"}
+                # Extract just the dialogue text, stripping any JSON/markdown artifacts
+                clean = re.sub(r"```(?:json)?\s*", "", text)
+                clean = re.sub(r"```\s*$", "", clean)
+                clean = re.sub(r'"inner_dialogue"\s*:\s*"?', "", clean)
+                clean = clean.strip().strip('"').strip("{").strip()
+                logger.warning("Failed to parse step JSON, using cleaned text as dialogue")
+                data = {
+                    "inner_dialogue": clean[:500] if clean else "Working on this step...",
+                    "action": "complete",
+                }
 
             inner_dialogue = data.get("inner_dialogue", "Working on this step...")
             action = data.get("action", "complete")
@@ -428,7 +488,7 @@ class WorkshopRunner:
             kwargs: dict[str, Any] = {
                 "model": model_name,
                 "messages": [{"role": "user", "content": prompt}],
-                "max_tokens": 300,
+                "max_tokens": self.llm_config.max_tokens,
                 "stream": False,
             }
             if self.llm_config.api_base:
@@ -438,10 +498,12 @@ class WorkshopRunner:
             text = str(response.choices[0].message.content or "")
 
             try:
-                data = _extract_json(text)
+                data = _robust_extract_json(text)
                 review = data.get("review", text)
             except (json.JSONDecodeError, ValueError):
-                review = text
+                # Strip markdown artifacts from review text
+                review = re.sub(r"```(?:json)?\s*", "", text)
+                review = re.sub(r"</?think>", "", review).strip()
 
             await self._inner_dialogue(f"Workshop review: {review}")
 

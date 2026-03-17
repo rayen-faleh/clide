@@ -115,13 +115,8 @@ export const useWorkshopStore = defineStore('workshop', () => {
   }
 
   function handleWorkshopEnded(msg: WSMessage) {
-    const payload = msg.payload as {
-      session_id: string
-      status: string
-      summary: string
-    }
-    if (!session.value) return
-    session.value.status = payload.status as WorkshopSession['status']
+    // Clear session when workshop ends (completed, abandoned, or discarded)
+    session.value = null
   }
 
   async function discardWorkshop(): Promise<void> {
@@ -130,6 +125,8 @@ export const useWorkshopStore = defineStore('workshop', () => {
     } catch (e) {
       console.error('Failed to discard workshop:', e)
     }
+    // Clear local state immediately
+    session.value = null
   }
 
   function clearSession() {
