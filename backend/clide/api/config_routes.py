@@ -160,6 +160,66 @@ async def delete_tool_skill(tool_name: str) -> dict[str, Any]:
     return {"tool_name": tool_name, "deleted": True}
 
 
+class ToolExecuteRequest(BaseModel):
+    """Arguments for tool execution."""
+
+    arguments: dict[str, Any] = {}
+
+
+@config_router.get("/tools/definitions")
+async def list_tool_definitions() -> dict[str, Any]:
+    """List all available tools with full schemas, grouped by server."""
+    try:
+        agent_core = get_agent_core()
+        if not isinstance(agent_core, AgentCore) or not agent_core.tool_registry:
+            return {"servers": {}, "total": 0}
+
+        registry = agent_core.tool_registry
+        all_tools = registry.get_all_tools()
+
+        servers: dict[str, list[dict[str, Any]]] = {}
+        for tool in all_tools:
+            server = tool.server_name
+            if server not in servers:
+                servers[server] = []
+            servers[server].append(
+                {
+                    "name": tool.name,
+                    "description": tool.description,
+                    "parameters": tool.parameters,
+                    "server_name": tool.server_name,
+                }
+            )
+
+        return {"servers": servers, "total": len(all_tools)}
+    except Exception:
+        logger.warning("Failed to list tool definitions", exc_info=True)
+        return {"servers": {}, "total": 0}
+
+
+@config_router.post("/tools/{tool_name}/execute")
+async def execute_tool(tool_name: str, body: ToolExecuteRequest) -> dict[str, Any]:
+    """Execute an MCP tool manually (playground mode)."""
+    try:
+        agent_core = get_agent_core()
+        if not isinstance(agent_core, AgentCore) or not agent_core.tool_registry:
+            raise HTTPException(status_code=503, detail="Tool registry not available")
+
+        result = await agent_core.tool_registry.execute_tool(tool_name, body.arguments)
+
+        return {
+            "tool_name": tool_name,
+            "success": result.success,
+            "result": result.result,
+            "error": result.error,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.warning("Tool execution failed: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Tool execution failed: {e}") from e
+
+
 def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> None:
     """Deep merge override into base dict (mutates base)."""
     for key, value in override.items():

@@ -12,6 +12,7 @@ defineProps<{
 
 const emit = defineEmits<{
   editSkill: [toolName: string]
+  openPlayground: [serverName: string]
 }>()
 </script>
 
@@ -26,6 +27,13 @@ const emit = defineEmits<{
           <span class="tool-description">{{ tool.description }}</span>
         </div>
         <button class="skill-btn" @click="emit('editSkill', tool.name)">Edit Skill</button>
+        <button
+          v-if="tool.status === 'available'"
+          class="playground-btn"
+          @click="emit('openPlayground', tool.name)"
+        >
+          Enter Playground
+        </button>
       </div>
     </div>
   </div>
@@ -61,7 +69,8 @@ const emit = defineEmits<{
   border-radius: 6px;
 }
 
-.skill-btn {
+.skill-btn,
+.playground-btn {
   flex-shrink: 0;
   padding: 4px 10px;
   font-size: 11px;
@@ -78,6 +87,14 @@ const emit = defineEmits<{
 .skill-btn:hover {
   background-color: var(--color-button);
   color: var(--color-user-text);
+}
+
+.playground-btn {
+  color: #4ade80;
+  border-color: rgba(34, 197, 94, 0.3);
+}
+.playground-btn:hover {
+  background-color: rgba(34, 197, 94, 0.15);
 }
 
 .status-dot {

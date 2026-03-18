@@ -2,6 +2,7 @@
 import { ref, onMounted } from 'vue'
 import AgentConfig from '@/components/AgentConfig.vue'
 import ToolStatus from '@/components/ToolStatus.vue'
+import ToolPlayground from '@/components/ToolPlayground.vue'
 
 interface Tool {
   name: string
@@ -18,6 +19,7 @@ const saving = ref(false)
 const toast = ref<{ message: string; type: 'success' | 'error' } | null>(null)
 const editingSkill = ref<string | null>(null)
 const skillContent = ref('')
+const playgroundServer = ref<string | null>(null)
 
 async function fetchConfig() {
   try {
@@ -150,7 +152,11 @@ onMounted(async () => {
         <div class="settings-sidebar">
           <section class="config-section">
             <h3 class="section-title">Tool Status</h3>
-            <ToolStatus :tools="tools" @edit-skill="loadSkill" />
+            <ToolStatus
+              :tools="tools"
+              @edit-skill="loadSkill"
+              @open-playground="(name: string) => (playgroundServer = name)"
+            />
           </section>
 
           <!-- Skill Editor (shown when editing) -->
@@ -176,6 +182,13 @@ onMounted(async () => {
     </template>
 
     <div v-if="saving" class="saving-overlay">Saving...</div>
+
+    <!-- Tool Playground Modal -->
+    <ToolPlayground
+      v-if="playgroundServer"
+      :server-name="playgroundServer"
+      @close="playgroundServer = null"
+    />
   </div>
 </template>
 
