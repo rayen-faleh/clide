@@ -137,6 +137,14 @@ onUnmounted(() => {
       <button v-if="workshopStore.isActive" class="discard-btn" @click="handleDiscard">
         Discard
       </button>
+      <button
+        v-if="workshopStore.session && !workshopStore.isActive"
+        class="resume-header-btn"
+        :disabled="resuming"
+        @click="handleResume"
+      >
+        {{ resuming ? 'Resuming...' : 'Resume' }}
+      </button>
     </div>
 
     <div v-if="!workshopStore.session" class="workshop-empty">
@@ -241,6 +249,25 @@ onUnmounted(() => {
 }
 .discard-btn:hover {
   background: rgba(239, 68, 68, 0.3);
+}
+
+.resume-header-btn {
+  padding: 6px 16px;
+  background: rgba(59, 130, 246, 0.15);
+  border: 1px solid #3b82f6;
+  border-radius: 6px;
+  color: #60a5fa;
+  font-size: 0.8rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+.resume-header-btn:hover:not(:disabled) {
+  background: rgba(59, 130, 246, 0.3);
+}
+.resume-header-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 .resume-btn {
