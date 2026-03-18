@@ -17,6 +17,14 @@ from clide.api.conversation_routes import conversation_router, set_conversation_
 from clide.api.goal_routes import goal_router, set_goal_manager
 from clide.api.memory_routes import cost_router, memory_router, set_amem, set_cost_tracker
 from clide.api.routes import router
+from clide.api.schemas import (
+    WorkshopDialoguePayload,
+    WorkshopEndedPayload,
+    WorkshopPlanPayload,
+    WorkshopStepUpdatePayload,
+    WSMessage,
+    WSMessageType,
+)
 from clide.api.websocket import set_agent_core, ws_router
 from clide.api.workshop_routes import set_agent_core as set_workshop_agent_core
 from clide.api.workshop_routes import workshop_router
@@ -34,6 +42,91 @@ from clide.memory.amem import AMem
 from clide.tools.registry import ToolRegistry
 
 logger = logging.getLogger(__name__)
+
+
+def _build_workshop_broadcast() -> Any:
+    """Build a reusable workshop broadcast function for WebSocket events."""
+    from clide.api.websocket import manager as ws_manager
+
+    async def workshop_broadcast(event: dict[str, Any]) -> None:
+        """Route workshop events to WebSocket."""
+        if event.get("workshop_dialogue"):
+            await ws_manager.broadcast(
+                WSMessage(
+                    type=WSMessageType.WORKSHOP_DIALOGUE,
+                    payload=WorkshopDialoguePayload(
+                        session_id=event["session_id"],
+                        content=event["content"],
+                    ).model_dump(),
+                )
+            )
+        elif event.get("workshop_plan"):
+            await ws_manager.broadcast(
+                WSMessage(
+                    type=WSMessageType.WORKSHOP_PLAN,
+                    payload=WorkshopPlanPayload(
+                        session_id=event["session_id"],
+                        objective=event["objective"],
+                        approach=event["approach"],
+                        steps=event["steps"],
+                    ).model_dump(),
+                )
+            )
+        elif event.get("workshop_step_update"):
+            await ws_manager.broadcast(
+                WSMessage(
+                    type=WSMessageType.WORKSHOP_STEP_UPDATE,
+                    payload=WorkshopStepUpdatePayload(
+                        session_id=event["session_id"],
+                        step_index=event["step_index"],
+                        status=event["status"],
+                        result_summary=event.get("result_summary", ""),
+                    ).model_dump(),
+                )
+            )
+        elif event.get("workshop_ended"):
+            await ws_manager.broadcast(
+                WSMessage(
+                    type=WSMessageType.WORKSHOP_ENDED,
+                    payload=WorkshopEndedPayload(
+                        session_id=event["session_id"],
+                        status=event["status"],
+                        summary=event.get("summary", ""),
+                    ).model_dump(),
+                )
+            )
+        elif event.get("tool_call") or event.get("tool_result") or event.get("state_change"):
+            # Forward tool/state events through the standard handler
+            from clide.api.schemas import (
+                ToolCallPayload,
+                ToolResultPayload,
+            )
+            from clide.api.websocket import manager as _ws
+
+            if event.get("tool_call"):
+                await _ws.broadcast(
+                    WSMessage(
+                        type=WSMessageType.TOOL_CALL,
+                        payload=ToolCallPayload(
+                            tool_name=event.get("tool_name", ""),
+                            arguments=event.get("arguments", {}),
+                            call_id=event.get("call_id", ""),
+                        ).model_dump(),
+                    )
+                )
+            elif event.get("tool_result"):
+                await _ws.broadcast(
+                    WSMessage(
+                        type=WSMessageType.TOOL_RESULT,
+                        payload=ToolResultPayload(
+                            call_id=event.get("call_id", ""),
+                            result=event.get("result"),
+                            error=event.get("error"),
+                        ).model_dump(),
+                    )
+                )
+
+    return workshop_broadcast
 
 
 def _load_or_create_born_at() -> datetime:
@@ -253,67 +346,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
                             goal = await goal_manager.create(new_goal)
 
                     if goal:
-                        from clide.api.schemas import (
-                            WorkshopDialoguePayload,
-                            WorkshopEndedPayload,
-                            WorkshopPlanPayload,
-                            WorkshopStartedPayload,
-                            WorkshopStepUpdatePayload,
-                        )
+                        from clide.api.schemas import WorkshopStartedPayload
 
-                        async def workshop_broadcast(
-                            event: dict[str, Any],
-                        ) -> None:
-                            """Route workshop events to WebSocket."""
-                            if event.get("workshop_dialogue"):
-                                await ws_manager.broadcast(
-                                    WSMessage(
-                                        type=WSMessageType.WORKSHOP_DIALOGUE,
-                                        payload=WorkshopDialoguePayload(
-                                            session_id=event["session_id"],
-                                            content=event["content"],
-                                        ).model_dump(),
-                                    )
-                                )
-                            elif event.get("workshop_plan"):
-                                await ws_manager.broadcast(
-                                    WSMessage(
-                                        type=WSMessageType.WORKSHOP_PLAN,
-                                        payload=WorkshopPlanPayload(
-                                            session_id=event["session_id"],
-                                            objective=event["objective"],
-                                            approach=event["approach"],
-                                            steps=event["steps"],
-                                        ).model_dump(),
-                                    )
-                                )
-                            elif event.get("workshop_step_update"):
-                                await ws_manager.broadcast(
-                                    WSMessage(
-                                        type=WSMessageType.WORKSHOP_STEP_UPDATE,
-                                        payload=WorkshopStepUpdatePayload(
-                                            session_id=event["session_id"],
-                                            step_index=event["step_index"],
-                                            status=event["status"],
-                                            result_summary=event.get("result_summary", ""),
-                                        ).model_dump(),
-                                    )
-                                )
-                            elif event.get("workshop_ended"):
-                                await ws_manager.broadcast(
-                                    WSMessage(
-                                        type=WSMessageType.WORKSHOP_ENDED,
-                                        payload=WorkshopEndedPayload(
-                                            session_id=event["session_id"],
-                                            status=event["status"],
-                                            summary=event.get("summary", ""),
-                                        ).model_dump(),
-                                    )
-                                )
-                            elif event.get("tool_call") or event.get("tool_result"):
-                                await thinking_tool_handler(event)
-
-                        agent_core.set_tool_event_callback(workshop_broadcast)
+                        agent_core.set_tool_event_callback(_build_workshop_broadcast())
 
                         await ws_manager.broadcast(
                             WSMessage(

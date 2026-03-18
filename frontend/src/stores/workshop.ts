@@ -130,6 +130,23 @@ export const useWorkshopStore = defineStore('workshop', () => {
     session.value = null
   }
 
+  async function resumeWorkshop(
+    goalDescription: string,
+    goalId: string = 'resumed-workshop',
+  ): Promise<boolean> {
+    try {
+      const res = await fetch('/api/workshop/resume', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ goal_description: goalDescription, goal_id: goalId }),
+      })
+      return res.ok
+    } catch (e) {
+      console.error('Failed to resume workshop:', e)
+      return false
+    }
+  }
+
   function clearSession() {
     session.value = null
   }
@@ -204,6 +221,7 @@ export const useWorkshopStore = defineStore('workshop', () => {
     handleWorkshopStepUpdate,
     handleWorkshopEnded,
     discardWorkshop,
+    resumeWorkshop,
     clearSession,
     loadSession,
   }

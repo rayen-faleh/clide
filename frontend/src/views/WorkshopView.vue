@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, onUnmounted } from 'vue'
+import { onMounted, onUnmounted, ref, watch } from 'vue'
 import { useWebSocket } from '@/composables/useWebSocket'
 import { useWorkshopStore } from '@/stores/workshop'
 import { useAgentStore } from '@/stores/agent'
@@ -7,9 +7,33 @@ import type { WSMessage } from '@/types/messages'
 import WorkshopPlanPanel from '@/components/WorkshopPlan.vue'
 import WorkshopDialogue from '@/components/WorkshopDialogue.vue'
 
+const LAST_GOAL_KEY = 'clide_workshop_last_goal'
+
 const { on, off, connect } = useWebSocket()
 const workshopStore = useWorkshopStore()
 const agentStore = useAgentStore()
+const resuming = ref(false)
+const lastGoal = ref<{ description: string; id: string } | null>(null)
+
+// Persist last goal when workshop starts
+watch(
+  () => workshopStore.session?.goalDescription,
+  (desc) => {
+    if (desc) {
+      const data = { description: desc, id: workshopStore.session?.id ?? 'resumed' }
+      localStorage.setItem(LAST_GOAL_KEY, JSON.stringify(data))
+      lastGoal.value = data
+    }
+  },
+)
+
+// Load last goal from localStorage
+try {
+  const raw = localStorage.getItem(LAST_GOAL_KEY)
+  if (raw) lastGoal.value = JSON.parse(raw)
+} catch {
+  /* ignore */
+}
 
 function handleStarted(msg: WSMessage) {
   workshopStore.handleWorkshopStarted(msg)
@@ -55,6 +79,16 @@ function handleToolResult(msg: WSMessage) {
 
 async function handleDiscard() {
   await workshopStore.discardWorkshop()
+}
+
+async function handleResume() {
+  if (!lastGoal.value) return
+  resuming.value = true
+  const success = await workshopStore.resumeWorkshop(lastGoal.value.description, lastGoal.value.id)
+  resuming.value = false
+  if (!success) {
+    console.error('Failed to resume workshop')
+  }
 }
 
 onMounted(async () => {
@@ -111,6 +145,9 @@ onUnmounted(() => {
         The agent will enter Workshop mode when a goal-oriented thought triggers a productivity
         surge.
       </p>
+      <button v-if="lastGoal" class="resume-btn" :disabled="resuming" @click="handleResume">
+        {{ resuming ? 'Resuming...' : `Resume: "${lastGoal.description}"` }}
+      </button>
     </div>
 
     <div v-else class="workshop-content">
@@ -204,6 +241,28 @@ onUnmounted(() => {
 }
 .discard-btn:hover {
   background: rgba(239, 68, 68, 0.3);
+}
+
+.resume-btn {
+  margin-top: 16px;
+  padding: 10px 24px;
+  background: rgba(59, 130, 246, 0.15);
+  border: 1px solid #3b82f6;
+  border-radius: 8px;
+  color: #60a5fa;
+  font-size: 0.85rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.2s;
+  max-width: 500px;
+  text-align: center;
+}
+.resume-btn:hover:not(:disabled) {
+  background: rgba(59, 130, 246, 0.3);
+}
+.resume-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 .workshop-empty {
