@@ -29,6 +29,7 @@ class ThinkingScheduler:
         self._agent_state_fn = agent_state_fn
         self._task: asyncio.Task[None] | None = None
         self._running = False
+        self._paused = False
         self._cycle_count = 0
         self._thinking_in_progress = False
         self._skipped_count = 0
@@ -36,6 +37,20 @@ class ThinkingScheduler:
     @property
     def is_running(self) -> bool:
         return self._running
+
+    @property
+    def is_paused(self) -> bool:
+        return self._paused
+
+    def pause(self) -> None:
+        """Pause the thinking scheduler (keeps running but skips cycles)."""
+        self._paused = True
+        logger.info("Thinking scheduler paused")
+
+    def resume(self) -> None:
+        """Resume the thinking scheduler."""
+        self._paused = False
+        logger.info("Thinking scheduler resumed")
 
     @property
     def cycle_count(self) -> int:
@@ -91,6 +106,11 @@ class ThinkingScheduler:
         """Main loop that fires the callback at intervals."""
         while self._running:
             try:
+                # Check if paused
+                if self._paused:
+                    await asyncio.sleep(self.interval_seconds)
+                    continue
+
                 # Check if agent is in workshop mode
                 if self._agent_state_fn:
                     current_state = self._agent_state_fn()

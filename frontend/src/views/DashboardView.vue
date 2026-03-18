@@ -19,6 +19,38 @@ const agentStore = useAgentStore()
 const { connect, on, off } = useWebSocket()
 
 const goals = ref<Goal[]>([])
+const thinkingPaused = ref(false)
+const togglingThinking = ref(false)
+
+async function fetchThinkingStatus() {
+  try {
+    const res = await fetch('/api/config/thinking/status')
+    if (res.ok) {
+      const data = await res.json()
+      thinkingPaused.value = data.paused
+    }
+  } catch (e) {
+    console.error('Failed to fetch thinking status:', e)
+  }
+}
+
+async function toggleThinking() {
+  togglingThinking.value = true
+  try {
+    const endpoint = thinkingPaused.value
+      ? '/api/config/thinking/resume'
+      : '/api/config/thinking/pause'
+    const res = await fetch(endpoint, { method: 'POST' })
+    if (res.ok) {
+      const data = await res.json()
+      thinkingPaused.value = data.paused
+    }
+  } catch (e) {
+    console.error('Failed to toggle thinking:', e)
+  } finally {
+    togglingThinking.value = false
+  }
+}
 
 async function fetchGoals() {
   try {
@@ -58,6 +90,7 @@ function handleThinkingToolResult(msg: WSMessage) {
 
 onMounted(() => {
   fetchGoals()
+  fetchThinkingStatus()
   on('thought', handleThought)
   on('mood_update', handleMoodUpdate)
   on('state_change', handleStateChange)
@@ -83,6 +116,14 @@ onUnmounted(() => {
         :mood="agentStore.mood?.mood ?? 'neutral'"
         :intensity="agentStore.mood?.intensity ?? 0.5"
       />
+      <button
+        class="thinking-toggle"
+        :class="{ paused: thinkingPaused }"
+        :disabled="togglingThinking"
+        @click="toggleThinking"
+      >
+        {{ thinkingPaused ? 'Resume Thinking' : 'Pause Thinking' }}
+      </button>
     </div>
     <div class="dashboard-body">
       <ThoughtStream :thoughts="agentStore.thoughts" class="dashboard-thoughts" />
@@ -124,5 +165,32 @@ onUnmounted(() => {
 
 .dashboard-goals {
   min-height: 0;
+}
+
+.thinking-toggle {
+  padding: 6px 14px;
+  font-size: 0.8rem;
+  font-weight: 500;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.2s;
+  background: rgba(234, 179, 8, 0.12);
+  border: 1px solid rgba(234, 179, 8, 0.4);
+  color: #facc15;
+}
+.thinking-toggle:hover:not(:disabled) {
+  background: rgba(234, 179, 8, 0.25);
+}
+.thinking-toggle.paused {
+  background: rgba(34, 197, 94, 0.12);
+  border-color: rgba(34, 197, 94, 0.4);
+  color: #4ade80;
+}
+.thinking-toggle.paused:hover:not(:disabled) {
+  background: rgba(34, 197, 94, 0.25);
+}
+.thinking-toggle:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 </style>

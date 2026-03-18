@@ -160,6 +160,46 @@ async def delete_tool_skill(tool_name: str) -> dict[str, Any]:
     return {"tool_name": tool_name, "deleted": True}
 
 
+_scheduler: Any = None
+
+
+def set_scheduler(scheduler: Any) -> None:
+    """Set scheduler reference for pause/resume control."""
+    global _scheduler  # noqa: PLW0603
+    _scheduler = scheduler
+
+
+@config_router.get("/thinking/status")
+async def get_thinking_status() -> dict[str, Any]:
+    """Get thinking scheduler status."""
+    if not _scheduler:
+        return {"running": False, "paused": False}
+    return {
+        "running": _scheduler.is_running,
+        "paused": _scheduler.is_paused,
+        "cycle_count": _scheduler.cycle_count,
+        "skipped_count": _scheduler.skipped_count,
+    }
+
+
+@config_router.post("/thinking/pause")
+async def pause_thinking() -> dict[str, Any]:
+    """Pause the thinking scheduler."""
+    if not _scheduler:
+        return {"error": "Scheduler not available"}
+    _scheduler.pause()
+    return {"paused": True}
+
+
+@config_router.post("/thinking/resume")
+async def resume_thinking() -> dict[str, Any]:
+    """Resume the thinking scheduler."""
+    if not _scheduler:
+        return {"error": "Scheduler not available"}
+    _scheduler.resume()
+    return {"paused": False}
+
+
 class ToolExecuteRequest(BaseModel):
     """Arguments for tool execution."""
 

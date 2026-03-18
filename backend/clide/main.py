@@ -369,6 +369,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
         interval = settings.agent.states.thinking.interval_seconds
         logger.info("Autonomy scheduler started (interval: %ss)", interval)
 
+    from clide.api.config_routes import set_scheduler
+
+    set_scheduler(scheduler)
+
     yield
 
     # Shutdown
