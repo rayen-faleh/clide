@@ -80,8 +80,6 @@ Create a structured execution plan.
 
 Goal: {goal_description}
 
-{personality_context}
-
 Available tools: {tools_context}
 
 Create a plan with 3-8 concrete steps. Each step should be actionable and \
@@ -95,8 +93,6 @@ Respond with ONLY this JSON:
 "success_criteria": "how to know this is done"}}]}}"""
 
 WORKSHOP_STEP_PROMPT = """You are in your Workshop, actively working on a goal.
-
-{personality_context}
 
 Overall objective: {objective}
 Approach: {approach}
@@ -123,8 +119,6 @@ For action, use one of:
 (provide result_summary)"""
 
 WORKSHOP_REVIEW_PROMPT = """You just finished all steps in your Workshop session.
-
-{personality_context}
 
 Goal: {objective}
 
@@ -221,7 +215,6 @@ class WorkshopRunner:
         """Generate a structured plan from the goal."""
         prompt = WORKSHOP_PLAN_PROMPT.format(
             goal_description=self.session.goal_description,
-            personality_context=self.personality_context,
             tools_context=self.tools_context,
         )
 
@@ -229,7 +222,7 @@ class WorkshopRunner:
             model_name = _build_model_name(self.llm_config)
             kwargs: dict[str, Any] = {
                 "model": model_name,
-                "messages": [{"role": "user", "content": prompt}],
+                "messages": self._build_messages(prompt),
                 "max_tokens": self.llm_config.max_tokens,
                 "stream": False,
             }
@@ -297,7 +290,6 @@ class WorkshopRunner:
             )
 
         prompt = WORKSHOP_STEP_PROMPT.format(
-            personality_context=self.personality_context,
             objective=(self.session.plan.objective if self.session.plan else ""),
             approach=(self.session.plan.approach if self.session.plan else ""),
             step_index=index + 1,
@@ -312,7 +304,7 @@ class WorkshopRunner:
             model_name = _build_model_name(self.llm_config)
             kwargs: dict[str, Any] = {
                 "model": model_name,
-                "messages": [{"role": "user", "content": prompt}],
+                "messages": self._build_messages(prompt),
                 "max_tokens": self.llm_config.max_tokens,
                 "stream": False,
             }
@@ -369,7 +361,6 @@ class WorkshopRunner:
             return
 
         tool_prompt = (
-            f"{self.personality_context}\n\n"
             f"You are in your Workshop. Use the available tools to "
             f"complete this step:\n"
             f"Step: {step.description}\n"
@@ -377,9 +368,7 @@ class WorkshopRunner:
             f"Use tools as needed, then respond with your findings."
         )
 
-        messages: list[dict[str, Any]] = [
-            {"role": "user", "content": tool_prompt},
-        ]
+        messages: list[dict[str, Any]] = self._build_messages(tool_prompt)
 
         # Tool loop (max 10 iterations)
         for _iteration in range(10):
@@ -482,7 +471,6 @@ class WorkshopRunner:
         )
 
         prompt = WORKSHOP_REVIEW_PROMPT.format(
-            personality_context=self.personality_context,
             objective=self.session.plan.objective,
             completed_steps=completed_steps,
         )
@@ -491,7 +479,7 @@ class WorkshopRunner:
             model_name = _build_model_name(self.llm_config)
             kwargs: dict[str, Any] = {
                 "model": model_name,
-                "messages": [{"role": "user", "content": prompt}],
+                "messages": self._build_messages(prompt),
                 "max_tokens": self.llm_config.max_tokens,
                 "stream": False,
             }
@@ -581,6 +569,29 @@ class WorkshopRunner:
                 "summary": summary,
             }
         )
+
+    def _build_messages(self, prompt: str) -> list[dict[str, Any]]:
+        """Build message list with system persona + user task prompt.
+
+        Separates personality context into system role (identity anchoring)
+        and keeps the task instructions as user role. This prevents the LLM
+        from treating the persona as instructions from another person.
+        """
+        messages: list[dict[str, Any]] = []
+        if self.personality_context:
+            messages.append(
+                {
+                    "role": "system",
+                    "content": (
+                        f"{self.personality_context}\n\n"
+                        "You are in your personal Workshop — a private, focused work session. "
+                        "You are thinking out loud to yourself. There is no one else here. "
+                        "Stay fully in character. Do not address anyone directly."
+                    ),
+                }
+            )
+        messages.append({"role": "user", "content": prompt})
+        return messages
 
     def pause(self) -> None:
         """Pause the workshop (user interrupted)."""

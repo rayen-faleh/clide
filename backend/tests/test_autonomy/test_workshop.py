@@ -602,7 +602,6 @@ class TestWorkshopPrompts:
 
     def test_plan_prompt_has_placeholders(self) -> None:
         assert "{goal_description}" in WORKSHOP_PLAN_PROMPT
-        assert "{personality_context}" in WORKSHOP_PLAN_PROMPT
         assert "{tools_context}" in WORKSHOP_PLAN_PROMPT
 
     def test_step_prompt_has_placeholders(self) -> None:
@@ -613,13 +612,12 @@ class TestWorkshopPrompts:
     def test_review_prompt_has_placeholders(self) -> None:
         assert "{objective}" in WORKSHOP_REVIEW_PROMPT
         assert "{completed_steps}" in WORKSHOP_REVIEW_PROMPT
-        assert "{personality_context}" in WORKSHOP_REVIEW_PROMPT
 
     def test_plan_prompt_formats_correctly(self) -> None:
+        """Personality context is now in system message, not in the prompt."""
         result = WORKSHOP_PLAN_PROMPT.format(
             goal_description="Test goal",
-            personality_context="Be helpful",
             tools_context="tool1, tool2",
         )
         assert "Test goal" in result
-        assert "Be helpful" in result
+        assert "tool1, tool2" in result
