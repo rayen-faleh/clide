@@ -139,6 +139,7 @@ class MCPClient:
                     "name": tool_name,
                     "arguments": arguments,
                 },
+                timeout=120.0,
             )
 
             if result and "content" in result:
@@ -194,7 +195,12 @@ class MCPClient:
         self._tools = []
         logger.info("MCP server %s disconnected", self.config.name)
 
-    async def _send_request(self, method: str, params: dict[str, Any]) -> dict[str, Any] | None:
+    async def _send_request(
+        self,
+        method: str,
+        params: dict[str, Any],
+        timeout: float = 30.0,
+    ) -> dict[str, Any] | None:
         """Send a JSON-RPC request and wait for response."""
         if not self._process or not self._process.stdin:
             return None
@@ -217,9 +223,15 @@ class MCPClient:
         await self._process.stdin.drain()
 
         try:
-            return await asyncio.wait_for(future, timeout=30.0)
+            return await asyncio.wait_for(future, timeout=timeout)
         except TimeoutError:
             self._pending.pop(request_id, None)
+            logger.warning(
+                "MCP request timed out after %ss: %s %s",
+                timeout,
+                method,
+                str(params)[:100],
+            )
             return None
 
     async def _send_notification(self, method: str, params: dict[str, Any]) -> None:
