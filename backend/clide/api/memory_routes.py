@@ -6,13 +6,19 @@
 
 from __future__ import annotations
 
+import logging
+import uuid
+from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import APIRouter, Query
+from pydantic import BaseModel
 
 from clide.core.cost import CostTracker
 from clide.memory.amem import AMem
 from clide.memory.models import Zettel
+
+logger = logging.getLogger(__name__)
 
 memory_router = APIRouter(prefix="/api/memories", tags=["memories"])
 
@@ -146,6 +152,72 @@ async def get_memory(memory_id: str) -> dict[str, Any]:
     if zettel is None:
         return {"error": "Memory not found", "id": memory_id}
     return _zettel_to_dict(zettel)
+
+
+class MemoryUploadItem(BaseModel):
+    """A single memory to upload."""
+
+    content: str
+    summary: str = ""
+    keywords: list[str] = []
+    tags: list[str] = []
+    importance: float = 0.5
+    timestamp: str = ""
+    metadata: dict[str, str] = {}
+
+
+class MemoryUploadRequest(BaseModel):
+    """Request body for uploading memories."""
+
+    memories: list[MemoryUploadItem]
+
+
+@memory_router.post("/upload")
+async def upload_memories(body: MemoryUploadRequest) -> dict[str, Any]:
+    """Upload fabricated memories directly into A-MEM (bypasses LLM extraction)."""
+    amem = get_amem()
+    created_ids: list[str] = []
+
+    for item in body.memories:
+        zettel_id = str(uuid.uuid4())
+
+        # Use provided timestamp or default to now
+        if item.timestamp:
+            try:
+                ts = datetime.fromisoformat(item.timestamp)
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=UTC)
+            except ValueError:
+                ts = datetime.now(UTC)
+        else:
+            ts = datetime.now(UTC)
+
+        zettel = Zettel(
+            id=zettel_id,
+            content=item.content,
+            summary=item.summary,
+            keywords=item.keywords,
+            tags=item.tags,
+            importance=max(0.0, min(1.0, item.importance)),
+            created_at=ts,
+            updated_at=ts,
+            metadata={**item.metadata, "type": "uploaded_memory"},
+        )
+
+        # Store in SQLite (bypasses LLM extraction pipeline)
+        await amem._save_zettel(zettel)
+
+        # Store in ChromaDB for semantic search
+        await amem.chroma.add(
+            zettel_id,
+            item.content,
+            metadata={"type": "uploaded_memory"},
+        )
+
+        created_ids.append(zettel_id)
+
+    logger.info("Uploaded %d memories", len(created_ids))
+    return {"created": len(created_ids), "ids": created_ids}
 
 
 # --- Cost stats router ---

@@ -8,6 +8,7 @@
         <RouterLink to="/chat">Chat</RouterLink>
         <RouterLink to="/dashboard">Dashboard</RouterLink>
         <RouterLink to="/workshop">Workshop</RouterLink>
+        <RouterLink to="/memories">Memories</RouterLink>
         <RouterLink to="/settings">Settings</RouterLink>
       </div>
     </nav>

@@ -23,6 +23,11 @@ const router = createRouter({
       component: () => import('@/views/WorkshopView.vue'),
     },
     {
+      path: '/memories',
+      name: 'memories',
+      component: () => import('@/views/MemoriesView.vue'),
+    },
+    {
       path: '/settings',
       name: 'settings',
       component: () => import('@/views/SettingsView.vue'),
