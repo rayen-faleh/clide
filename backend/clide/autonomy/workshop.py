@@ -145,8 +145,12 @@ class WorkshopRunner:
         tool_definitions: list[dict[str, Any]] | None = None,
         broadcast_fn: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
         tool_execute_fn: (Callable[[str, dict[str, Any]], Awaitable[Any]] | None) = None,
+        amem: Any = None,
+        agent_name: str = "Clide",
     ) -> None:
         self.llm_config = llm_config
+        self._amem = amem
+        self._agent_name = agent_name
         self.session = WorkshopSession(
             id=str(uuid.uuid4()),
             goal_id=goal_id,
@@ -172,6 +176,14 @@ class WorkshopRunner:
 
             self.session.plan = plan
             await self._broadcast_plan()
+
+            # Store plan in memory
+            await self._store_memory(
+                f"{self._agent_name} entered the Workshop to work on: "
+                f"{plan.objective}. Approach: {plan.approach}. "
+                f"Steps: {', '.join(s.description for s in plan.steps)}",
+                {"type": "workshop", "phase": "plan"},
+            )
 
             # Phase 2: Execute each step
             for i, step in enumerate(plan.steps):
@@ -202,6 +214,18 @@ class WorkshopRunner:
                 await self._review()
                 self.session.status = "completed"
                 await self._broadcast_ended("completed", "Workshop completed successfully")
+
+                # Store completion summary in memory
+                step_results = "; ".join(
+                    f"{s.description}: {s.result_summary or s.status}"
+                    for s in (self.session.plan.steps if self.session.plan else [])
+                )
+                await self._store_memory(
+                    f"{self._agent_name} completed a Workshop session on: "
+                    f"{self.session.goal_description}. "
+                    f"Results: {step_results[:500]}",
+                    {"type": "workshop", "phase": "completed"},
+                )
             else:
                 self.session.status = "abandoned"
                 await self._broadcast_ended("abandoned", "Workshop was cancelled")
@@ -569,6 +593,15 @@ class WorkshopRunner:
                 "summary": summary,
             }
         )
+
+    async def _store_memory(self, content: str, metadata: dict[str, str]) -> None:
+        """Store a workshop event in A-MEM for long-term recall."""
+        if not self._amem:
+            return
+        try:
+            await self._amem.remember(content, metadata=metadata)
+        except Exception:
+            logger.warning("Failed to store workshop memory", exc_info=True)
 
     def _build_messages(self, prompt: str) -> list[dict[str, Any]]:
         """Build message list with system persona + user task prompt.

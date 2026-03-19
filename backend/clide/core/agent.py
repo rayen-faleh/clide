@@ -1198,6 +1198,8 @@ class AgentCore:
             tool_definitions=tool_definitions,
             broadcast_fn=self._tool_event_callback,
             tool_execute_fn=(self.tool_registry.execute_tool if self.tool_registry else None),
+            amem=self.amem,
+            agent_name=self._agent_name,
         )
 
         self._track_task(self._run_workshop())
