@@ -1200,6 +1200,7 @@ class AgentCore:
             tool_execute_fn=(self.tool_registry.execute_tool if self.tool_registry else None),
             amem=self.amem,
             agent_name=self._agent_name,
+            tool_skills=self._load_tool_skills(),
         )
 
         self._track_task(self._run_workshop())

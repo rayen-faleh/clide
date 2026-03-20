@@ -147,10 +147,12 @@ class WorkshopRunner:
         tool_execute_fn: (Callable[[str, dict[str, Any]], Awaitable[Any]] | None) = None,
         amem: Any = None,
         agent_name: str = "Clide",
+        tool_skills: dict[str, str] | None = None,
     ) -> None:
         self.llm_config = llm_config
         self._amem = amem
         self._agent_name = agent_name
+        self._tool_skills = tool_skills or {}
         self.session = WorkshopSession(
             id=str(uuid.uuid4()),
             goal_id=goal_id,
@@ -611,18 +613,26 @@ class WorkshopRunner:
         from treating the persona as instructions from another person.
         """
         messages: list[dict[str, Any]] = []
+
+        # System message: persona + workshop context + tool skills
+        system_parts = []
         if self.personality_context:
-            messages.append(
-                {
-                    "role": "system",
-                    "content": (
-                        f"{self.personality_context}\n\n"
-                        "You are in your personal Workshop — a private, focused work session. "
-                        "You are thinking out loud to yourself. There is no one else here. "
-                        "Stay fully in character. Do not address anyone directly."
-                    ),
-                }
-            )
+            system_parts.append(self.personality_context)
+
+        system_parts.append(
+            "You are in your personal Workshop — a private, focused work session. "
+            "You are thinking out loud to yourself. There is no one else here. "
+            "Stay fully in character. Do not address anyone directly."
+        )
+
+        # Inject tool skill files so the agent knows how to use each tool
+        if self._tool_skills:
+            skill_lines = ["## Tool Usage Guidelines\n"]
+            for tool_name, skill_text in self._tool_skills.items():
+                skill_lines.append(f"### {tool_name}\n{skill_text}\n")
+            system_parts.append("\n".join(skill_lines))
+
+        messages.append({"role": "system", "content": "\n\n".join(system_parts)})
         messages.append({"role": "user", "content": prompt})
         return messages
 
