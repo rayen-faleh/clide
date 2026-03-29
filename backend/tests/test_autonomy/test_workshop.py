@@ -527,19 +527,25 @@ class TestWorkshopRunnerToolExecution:
 
     @pytest.mark.asyncio
     async def test_execute_tools_for_step(self) -> None:
-        # First call: tool call, second call: text response
-        tool_response = _make_tool_response_with_calls(
-            [{"name": "web_search", "arguments": '{"query": "test"}', "id": "c1"}]
-        )
-        text_response = _make_llm_response("Found the answer.")
+        from clide.core.agent_events import TextChunkEvent, ToolCallEvent, ToolResultEvent
 
-        tool_result = MagicMock()
-        tool_result.success = True
-        tool_result.result = "search results here"
-        tool_result.error = None
-
-        tool_exec = AsyncMock(return_value=tool_result)
+        tool_exec = AsyncMock()
         broadcast = AsyncMock()
+
+        # Mock agent_step_fn: yields a ToolCallEvent, ToolResultEvent, then TextChunkEvent
+        async def mock_agent_step_fn(**kwargs: Any):
+            yield ToolCallEvent(
+                tool_name="web_search",
+                arguments={"query": "test"},
+                call_id="c1",
+            )
+            yield ToolResultEvent(
+                call_id="c1",
+                result="search results here",
+                success=True,
+                error=None,
+            )
+            yield TextChunkEvent(content="Found the answer.", done=True)
 
         runner = WorkshopRunner(
             llm_config=LLMConfig(),
@@ -548,6 +554,7 @@ class TestWorkshopRunnerToolExecution:
             tool_definitions=[{"function": {"name": "web_search"}}],
             tool_execute_fn=tool_exec,
             broadcast_fn=broadcast,
+            agent_step_fn=mock_agent_step_fn,
         )
 
         step = WorkshopStep(
@@ -556,15 +563,11 @@ class TestWorkshopRunnerToolExecution:
             success_criteria="found info",
         )
 
-        with patch(
-            "clide.autonomy.workshop.complete_with_tools",
-            new_callable=AsyncMock,
-            side_effect=[tool_response, text_response],
-        ):
-            await runner._execute_tools_for_step(step)
+        await runner._execute_tools_for_step(step)
 
-        tool_exec.assert_called_once_with("web_search", {"query": "test"})
         assert step.result_summary == "Found the answer."
+        # ToolCallEvent broadcast should have been called
+        broadcast.assert_awaited()
 
     @pytest.mark.asyncio
     async def test_execute_tools_cancelled(self) -> None:
@@ -621,3 +624,131 @@ class TestWorkshopPrompts:
         )
         assert "Test goal" in result
         assert "tool1, tool2" in result
+
+
+class TestWorkshopMemoryRecall:
+    """Tests for workshop memory recall via ContextBuilder."""
+
+    @pytest.mark.asyncio
+    async def test_recall_context_with_builder(self) -> None:
+        """Mock context_builder.build(), verify formatted output."""
+        from clide.core.context_builder import ContextResult
+
+        mock_builder = AsyncMock()
+        mock_builder.build = AsyncMock(
+            return_value=ContextResult(
+                memory_text="- Learned about X [2h ago]",
+                cross_mode_text="- [chat] User: asked about Y",
+                memories_used=1,
+            )
+        )
+
+        runner = WorkshopRunner(
+            llm_config=LLMConfig(),
+            goal_id="g1",
+            goal_description="Test goal",
+            context_builder=mock_builder,
+        )
+
+        result = await runner._recall_context("test query")
+
+        assert "## Relevant Memories" in result
+        assert "Learned about X" in result
+        assert "## Recent Activity" in result
+        assert "asked about Y" in result
+        mock_builder.build.assert_awaited_once_with(
+            query="test query",
+            current_mode="workshop",
+            memory_limit=5,
+            event_limit=5,
+        )
+
+    @pytest.mark.asyncio
+    async def test_recall_context_without_builder(self) -> None:
+        """Returns empty string when no context_builder is set."""
+        runner = WorkshopRunner(
+            llm_config=LLMConfig(),
+            goal_id="g1",
+            goal_description="Test goal",
+        )
+
+        result = await runner._recall_context("test query")
+        assert result == ""
+
+    @pytest.mark.asyncio
+    async def test_generate_plan_includes_context(self) -> None:
+        """Verify that _generate_plan passes recalled context to LLM messages."""
+        from clide.core.context_builder import ContextResult
+
+        mock_builder = AsyncMock()
+        mock_builder.build = AsyncMock(
+            return_value=ContextResult(
+                memory_text="- Previously researched topic Z",
+                cross_mode_text="",
+                memories_used=1,
+            )
+        )
+
+        plan_json = (
+            '{"objective": "test", "approach": "do it", '
+            '"steps": [{"description": "step 1"}]}'
+        )
+
+        runner = WorkshopRunner(
+            llm_config=LLMConfig(),
+            goal_id="g1",
+            goal_description="Test goal",
+            context_builder=mock_builder,
+        )
+
+        with patch("clide.autonomy.workshop.litellm") as mock_litellm:
+            mock_litellm.acompletion = AsyncMock(
+                return_value=_make_llm_response(plan_json)
+            )
+            plan = await runner._generate_plan()
+
+        assert plan is not None
+        # Verify the LLM was called with messages containing the context
+        call_kwargs = mock_litellm.acompletion.call_args[1]
+        messages = call_kwargs["messages"]
+        system_content = messages[0]["content"]
+        assert "Previously researched topic Z" in system_content
+
+    @pytest.mark.asyncio
+    async def test_workshop_no_context_builder_still_works(self) -> None:
+        """Backward compat: None builder = same old behavior."""
+        plan_json = (
+            '{"objective": "test", "approach": "do it", '
+            '"steps": [{"description": "step 1"}]}'
+        )
+        step_json = (
+            '{"inner_dialogue": "Working", "action": "complete", '
+            '"result_summary": "Done"}'
+        )
+        review_json = '{"review": "Good."}'
+
+        call_count = 0
+
+        async def mock_acompletion(**kwargs: Any) -> MagicMock:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return _make_llm_response(plan_json)
+            elif call_count == 2:
+                return _make_llm_response(step_json)
+            else:
+                return _make_llm_response(review_json)
+
+        runner = WorkshopRunner(
+            llm_config=LLMConfig(),
+            goal_id="g1",
+            goal_description="Test goal",
+        )
+        # Explicitly no context_builder
+        assert runner._context_builder is None
+
+        with patch("clide.autonomy.workshop.litellm") as mock_litellm:
+            mock_litellm.acompletion = mock_acompletion
+            await runner.run()
+
+        assert runner.session.status == "completed"

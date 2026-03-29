@@ -13,7 +13,13 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from clide.api.config_routes import config_router
-from clide.api.conversation_routes import conversation_router, set_conversation_store
+from clide.api.conversation_routes import (
+    conversation_router,
+    set_conversation_store,
+)
+from clide.api.conversation_routes import (
+    set_event_log as set_conversation_event_log,
+)
 from clide.api.goal_routes import goal_router, set_goal_manager
 from clide.api.memory_routes import cost_router, memory_router, set_amem, set_cost_tracker
 from clide.api.routes import router
@@ -234,6 +240,19 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
         )
 
     agent_core.tool_registry = tool_registry
+
+    # Event log for unified state tracking across chat/workshop/thinking
+    from clide.core.event_log import EventLog
+
+    event_log = EventLog(db_path=Path("data/events.db"))
+    agent_core.event_log = event_log
+    set_conversation_event_log(event_log)
+
+    # Context builder for cross-mode awareness
+    from clide.core.context_builder import ContextBuilder
+
+    context_builder = ContextBuilder(event_log=event_log, amem=agent_core.amem)
+    agent_core.context_builder = context_builder
 
     # Goal manager
     goal_manager = GoalManager()

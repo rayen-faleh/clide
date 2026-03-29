@@ -14,7 +14,12 @@ from typing import Any
 import litellm
 
 from clide.autonomy.models import WorkshopPlan, WorkshopSession, WorkshopStep
-from clide.core.llm import LLMConfig, _build_model_name, complete_with_tools
+from clide.core.agent_events import (
+    TextChunkEvent,
+    ToolCallEvent,
+    ToolResultEvent,
+)
+from clide.core.llm import LLMConfig, _build_model_name
 from clide.memory.processor import _extract_json
 
 logger = logging.getLogger(__name__)
@@ -148,8 +153,11 @@ class WorkshopRunner:
         amem: Any = None,
         agent_name: str = "Clide",
         tool_skills: dict[str, str] | None = None,
+        agent_step_fn: Any = None,
+        context_builder: Any = None,
     ) -> None:
         self.llm_config = llm_config
+        self._agent_step_fn = agent_step_fn
         self._amem = amem
         self._agent_name = agent_name
         self._tool_skills = tool_skills or {}
@@ -163,6 +171,7 @@ class WorkshopRunner:
         self.tool_definitions = tool_definitions or []
         self._broadcast_fn = broadcast_fn
         self._tool_execute_fn = tool_execute_fn
+        self._context_builder = context_builder
         self._cancelled = False
         self._paused = False
 
@@ -243,20 +252,34 @@ class WorkshopRunner:
             goal_description=self.session.goal_description,
             tools_context=self.tools_context,
         )
+        context_section = await self._recall_context(
+            self.session.goal_description, memory_limit=5
+        )
 
         try:
-            model_name = _build_model_name(self.llm_config)
-            kwargs: dict[str, Any] = {
-                "model": model_name,
-                "messages": self._build_messages(prompt),
-                "max_tokens": self.llm_config.max_tokens,
-                "stream": False,
-            }
-            if self.llm_config.api_base:
-                kwargs["api_base"] = self.llm_config.api_base
-
-            response = await litellm.acompletion(**kwargs)
-            text = str(response.choices[0].message.content or "")
+            if self._agent_step_fn:
+                text = ""
+                async for event in self._agent_step_fn(
+                    messages=self._build_messages(prompt, extra_context=context_section),
+                    tools=[],
+                    session_id=str(uuid.uuid4()),
+                    mode="workshop",
+                    purpose="workshop_plan",
+                ):
+                    if isinstance(event, TextChunkEvent) and event.content:
+                        text += event.content
+            else:
+                model_name = _build_model_name(self.llm_config)
+                kwargs: dict[str, Any] = {
+                    "model": model_name,
+                    "messages": self._build_messages(prompt, extra_context=context_section),
+                    "max_tokens": self.llm_config.max_tokens,
+                    "stream": False,
+                }
+                if self.llm_config.api_base:
+                    kwargs["api_base"] = self.llm_config.api_base
+                response = await litellm.acompletion(**kwargs)
+                text = str(response.choices[0].message.content or "")
 
             # Strip think tags (Mistral thinking models)
             text = re.sub(r"</?think>", "", text).strip()
@@ -325,20 +348,32 @@ class WorkshopRunner:
             tools_for_step=(", ".join(step.tools_needed) if step.tools_needed else "any available"),
             previous_results=previous_results or "(none yet)",
         )
+        context_section = await self._recall_context(step.description, memory_limit=3)
 
         try:
-            model_name = _build_model_name(self.llm_config)
-            kwargs: dict[str, Any] = {
-                "model": model_name,
-                "messages": self._build_messages(prompt),
-                "max_tokens": self.llm_config.max_tokens,
-                "stream": False,
-            }
-            if self.llm_config.api_base:
-                kwargs["api_base"] = self.llm_config.api_base
-
-            response = await litellm.acompletion(**kwargs)
-            text = str(response.choices[0].message.content or "")
+            if self._agent_step_fn:
+                text = ""
+                async for event in self._agent_step_fn(
+                    messages=self._build_messages(prompt, extra_context=context_section),
+                    tools=[],
+                    session_id=str(uuid.uuid4()),
+                    mode="workshop",
+                    purpose="workshop_step_decision",
+                ):
+                    if isinstance(event, TextChunkEvent) and event.content:
+                        text += event.content
+            else:
+                model_name = _build_model_name(self.llm_config)
+                step_kwargs: dict[str, Any] = {
+                    "model": model_name,
+                    "messages": self._build_messages(prompt, extra_context=context_section),
+                    "max_tokens": self.llm_config.max_tokens,
+                    "stream": False,
+                }
+                if self.llm_config.api_base:
+                    step_kwargs["api_base"] = self.llm_config.api_base
+                response = await litellm.acompletion(**step_kwargs)
+                text = str(response.choices[0].message.content or "")
 
             try:
                 data = _robust_extract_json(text)
@@ -371,7 +406,7 @@ class WorkshopRunner:
                 return
 
             # action == "use_tools": execute tools
-            if self.tool_definitions and self._tool_execute_fn:
+            if self.tool_definitions and self._agent_step_fn:
                 await self._execute_tools_for_step(step)
 
             if not step.result_summary:
@@ -382,8 +417,8 @@ class WorkshopRunner:
             step.result_summary = "Step failed due to error"
 
     async def _execute_tools_for_step(self, step: WorkshopStep) -> None:
-        """Execute tools for a workshop step using the tool-aware LLM pattern."""
-        if not self.tool_definitions or not self._tool_execute_fn:
+        """Execute tools for a workshop step via the unified agent loop."""
+        if not self.tool_definitions or not self._agent_step_fn:
             return
 
         tool_prompt = (
@@ -395,96 +430,49 @@ class WorkshopRunner:
         )
 
         messages: list[dict[str, Any]] = self._build_messages(tool_prompt)
+        session_id = str(uuid.uuid4())
+        full_text = ""
 
-        # Tool loop (max 10 iterations)
-        for _iteration in range(10):
-            if self._cancelled:
-                break
-
-            # Rate limit: brief pause between LLM calls to avoid API throttling
-            if _iteration > 0:
-                await asyncio.sleep(1)
-
-            try:
-                response = await complete_with_tools(
-                    messages, self.llm_config, self.tool_definitions
-                )
-            except Exception:
-                logger.exception("Tool call failed in workshop step")
-                break
-
-            choice = response.choices[0]
-
-            if choice.finish_reason == "tool_calls" and choice.message.tool_calls:
-                messages.append(choice.message.model_dump())
-
-                for tool_call in choice.message.tool_calls:
-                    func = tool_call.function
-                    tool_name = func.name
+        async for event in self._agent_step_fn(
+            messages=messages,
+            tools=self.tool_definitions,
+            session_id=session_id,
+            mode="workshop",
+            phase_size=10,
+            max_phases=1,
+            purpose="workshop_step",
+        ):
+            if isinstance(event, TextChunkEvent):
+                if event.content:
+                    full_text += event.content
+                if event.done and full_text:
+                    await self._inner_dialogue(full_text)
+                    step.result_summary = full_text[:500]
+            elif isinstance(event, ToolCallEvent):
+                if self._broadcast_fn:
                     try:
-                        arguments = (
-                            json.loads(func.arguments)
-                            if isinstance(func.arguments, str)
-                            else func.arguments
-                        )
-                    except (json.JSONDecodeError, TypeError):
-                        arguments = {}
-
-                    # Broadcast tool call
-                    if self._broadcast_fn:
-                        await self._broadcast_fn(
-                            {
-                                "tool_call": True,
-                                "tool_name": tool_name,
-                                "arguments": arguments,
-                                "call_id": tool_call.id,
-                            }
-                        )
-
-                    # Execute tool
-                    result = await self._tool_execute_fn(tool_name, arguments)
-
-                    # Broadcast tool result
-                    if self._broadcast_fn:
-                        await self._broadcast_fn(
-                            {
-                                "tool_result": True,
-                                "call_id": tool_call.id,
-                                "result": (
-                                    result.result if hasattr(result, "result") else str(result)
-                                ),
-                                "error": (result.error if hasattr(result, "error") else None),
-                                "success": (result.success if hasattr(result, "success") else True),
-                            }
-                        )
-
-                    # Broadcast as inner dialogue too
-                    result_preview = str(result.result if hasattr(result, "result") else result)[
-                        :200
-                    ]
-                    await self._inner_dialogue(f"Used {tool_name} -> {result_preview}")
-
-                    result_content = (
-                        json.dumps(result.result)
-                        if hasattr(result, "result") and result.success
-                        else (f"Error: {result.error}" if hasattr(result, "error") else str(result))
-                    )
-                    messages.append(
-                        {
-                            "role": "tool",
-                            "tool_call_id": tool_call.id,
-                            "content": result_content,
-                        }
-                    )
-
-                continue
-            else:
-                # Text response -- step is done
-                text_result = choice.message.content or ""
-                if text_result:
-                    await self._inner_dialogue(text_result)
-                    step.result_summary = text_result[:500]
-                break
+                        await self._broadcast_fn({
+                            "tool_call": True,
+                            "tool_name": event.tool_name,
+                            "arguments": event.arguments,
+                            "call_id": event.call_id,
+                        })
+                    except Exception:
+                        logger.warning("Workshop tool call broadcast failed", exc_info=True)
+            elif isinstance(event, ToolResultEvent):
+                preview = str(event.result)[:200] if event.result else ""
+                await self._inner_dialogue(f"Used tool -> {preview}")
+                if self._broadcast_fn:
+                    try:
+                        await self._broadcast_fn({
+                            "tool_result": True,
+                            "call_id": event.call_id,
+                            "result": event.result,
+                            "error": event.error,
+                            "success": event.success,
+                        })
+                    except Exception:
+                        logger.warning("Workshop tool result broadcast failed", exc_info=True)
 
     async def _review(self) -> None:
         """Final review of the workshop session."""
@@ -502,18 +490,29 @@ class WorkshopRunner:
         )
 
         try:
-            model_name = _build_model_name(self.llm_config)
-            kwargs: dict[str, Any] = {
-                "model": model_name,
-                "messages": self._build_messages(prompt),
-                "max_tokens": self.llm_config.max_tokens,
-                "stream": False,
-            }
-            if self.llm_config.api_base:
-                kwargs["api_base"] = self.llm_config.api_base
-
-            response = await litellm.acompletion(**kwargs)
-            text = str(response.choices[0].message.content or "")
+            if self._agent_step_fn:
+                text = ""
+                async for event in self._agent_step_fn(
+                    messages=self._build_messages(prompt),
+                    tools=[],
+                    session_id=str(uuid.uuid4()),
+                    mode="workshop",
+                    purpose="workshop_review",
+                ):
+                    if isinstance(event, TextChunkEvent) and event.content:
+                        text += event.content
+            else:
+                model_name = _build_model_name(self.llm_config)
+                rev_kwargs: dict[str, Any] = {
+                    "model": model_name,
+                    "messages": self._build_messages(prompt),
+                    "max_tokens": self.llm_config.max_tokens,
+                    "stream": False,
+                }
+                if self.llm_config.api_base:
+                    rev_kwargs["api_base"] = self.llm_config.api_base
+                response = await litellm.acompletion(**rev_kwargs)
+                text = str(response.choices[0].message.content or "")
 
             try:
                 data = _robust_extract_json(text)
@@ -605,7 +604,24 @@ class WorkshopRunner:
         except Exception:
             logger.warning("Failed to store workshop memory", exc_info=True)
 
-    def _build_messages(self, prompt: str) -> list[dict[str, Any]]:
+    async def _recall_context(self, query: str, memory_limit: int = 5) -> str:
+        """Recall memories + cross-mode events relevant to a query."""
+        if not self._context_builder:
+            return ""
+        result = await self._context_builder.build(
+            query=query,
+            current_mode="workshop",
+            memory_limit=memory_limit,
+            event_limit=5,
+        )
+        parts: list[str] = []
+        if result.memory_text:
+            parts.append(f"## Relevant Memories\n{result.memory_text}")
+        if result.cross_mode_text:
+            parts.append(f"## Recent Activity\n{result.cross_mode_text}")
+        return "\n\n".join(parts)
+
+    def _build_messages(self, prompt: str, extra_context: str = "") -> list[dict[str, Any]]:
         """Build message list with system persona + user task prompt.
 
         Separates personality context into system role (identity anchoring)
@@ -631,6 +647,9 @@ class WorkshopRunner:
             for tool_name, skill_text in self._tool_skills.items():
                 skill_lines.append(f"### {tool_name}\n{skill_text}\n")
             system_parts.append("\n".join(skill_lines))
+
+        if extra_context:
+            system_parts.append(extra_context)
 
         messages.append({"role": "system", "content": "\n\n".join(system_parts)})
         messages.append({"role": "user", "content": prompt})
