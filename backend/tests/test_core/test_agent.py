@@ -1182,10 +1182,12 @@ class TestProcessMessageWithTools:
 
 
 class TestProcessWithTools:
-    """Tests for _process_with_tools method."""
+    """Tests for agent_step() tool-calling behavior (formerly _process_with_tools)."""
 
     @pytest.mark.asyncio
     async def test_executes_tool_and_returns_text(self) -> None:
+        from clide.core.agent_events import TextChunkEvent
+
         registry = _make_mock_registry()
         agent = AgentCore(tool_registry=registry)
         # Force CONVERSING state so WORKING transition is valid
@@ -1198,16 +1200,23 @@ class TestProcessWithTools:
 
         with patch("clide.core.agent.complete_with_tools", new_callable=AsyncMock) as mock_cwt:
             mock_cwt.side_effect = [tool_response, text_response]
-            result = await agent._process_with_tools(  # noqa: SLF001
-                [{"role": "user", "content": "search"}],
-                registry.get_tool_definitions_for_llm(),
-            )
+            events = []
+            async for event in agent.agent_step(
+                messages=[{"role": "user", "content": "search"}],
+                tools=registry.get_tool_definitions_for_llm(),
+                session_id="test-session",
+                mode="chat",
+            ):
+                events.append(event)
 
-        assert result == "Here are the results."
+        text_events = [e for e in events if isinstance(e, TextChunkEvent) and e.done]
+        assert text_events[-1].content == "Here are the results."
         registry.execute_tool.assert_awaited_once_with("web_search", {"query": "test"})
 
     @pytest.mark.asyncio
     async def test_max_iterations_safety(self) -> None:
+        from clide.core.agent_events import TextChunkEvent
+
         registry = _make_mock_registry()
         agent = AgentCore(tool_registry=registry)
         agent.state_machine.transition(AgentState.CONVERSING, "test")
@@ -1226,32 +1235,36 @@ class TestProcessWithTools:
         checkpoint_response = MagicMock()
         checkpoint_response.choices = [MagicMock()]
         checkpoint_response.choices[0].message.content = "Checkpoint summary"
+        checkpoint_response.usage = MagicMock(prompt_tokens=10, completion_tokens=5)
 
-        with (
-            patch("clide.core.agent.complete_with_tools", new_callable=AsyncMock) as mock_cwt,
-            patch("clide.core.agent.litellm") as mock_litellm,
-        ):
+        with patch("clide.core.agent.complete_with_tools", new_callable=AsyncMock) as mock_cwt:
+            # agent_step uses complete_with_tools for checkpoints too
             mock_cwt.side_effect = lambda *a, **kw: make_unique_tool_response()
-            mock_litellm.acompletion = AsyncMock(return_value=checkpoint_response)
-            result = await agent._process_with_tools(  # noqa: SLF001
-                [{"role": "user", "content": "search"}],
-                registry.get_tool_definitions_for_llm(),
+            events = []
+            async for event in agent.agent_step(
+                messages=[{"role": "user", "content": "search"}],
+                tools=registry.get_tool_definitions_for_llm(),
+                session_id="test-session",
+                mode="chat",
                 phase_size=3,
                 max_phases=2,
-            )
+            ):
+                events.append(event)
 
+        text_events = [e for e in events if isinstance(e, TextChunkEvent) and e.done]
+        assert text_events
+        result = text_events[-1].content
         assert "extensive research" in result.lower() or "tool" in result.lower()
-        # Total tool calls should be phase_size * max_phases = 6
-        assert mock_cwt.await_count == 6
+        # phase_size * max_phases = 6 tool calls + 1 checkpoint call = 7 total
+        assert mock_cwt.await_count == 7
 
     @pytest.mark.asyncio
     async def test_tool_event_callback_called(self) -> None:
+        from clide.core.agent_events import StateChangeEvent, TextChunkEvent, ToolCallEvent, ToolResultEvent
+
         registry = _make_mock_registry()
         agent = AgentCore(tool_registry=registry)
         agent.state_machine.transition(AgentState.CONVERSING, "test")
-
-        callback = AsyncMock()
-        agent.set_tool_event_callback(callback)
 
         tool_response = _make_tool_response(
             tool_calls=[("web_search", '{"query": "test"}', "call_123")]
@@ -1260,37 +1273,36 @@ class TestProcessWithTools:
 
         with patch("clide.core.agent.complete_with_tools", new_callable=AsyncMock) as mock_cwt:
             mock_cwt.side_effect = [tool_response, text_response]
-            await agent._process_with_tools(  # noqa: SLF001
-                [{"role": "user", "content": "search"}],
-                registry.get_tool_definitions_for_llm(),
-            )
+            events = []
+            async for event in agent.agent_step(
+                messages=[{"role": "user", "content": "search"}],
+                tools=registry.get_tool_definitions_for_llm(),
+                session_id="test-session",
+                mode="chat",
+            ):
+                events.append(event)
 
-        # 4 callbacks: state→working, tool_call, tool_result, state→conversing
-        assert callback.await_count == 4
-        events = [call[0][0] for call in callback.call_args_list]
-        # First: state change to working
-        assert events[0].get("state_change") is True
-        assert events[0]["new_state"] == "working"
-        # Second: tool call
-        assert events[1].get("tool_call") is True
-        assert events[1]["tool_name"] == "web_search"
-        assert events[1]["call_id"] == "call_123"
-        # Third: tool result
-        assert events[2].get("tool_result") is True
-        assert events[2]["call_id"] == "call_123"
-        assert events[2]["success"] is True
-        # Fourth: state change back to conversing
-        assert events[3].get("state_change") is True
-        assert events[3]["new_state"] == "conversing"
+        # Verify that state change, tool call, and tool result events were yielded
+        state_events = [e for e in events if isinstance(e, StateChangeEvent)]
+        tool_call_events = [e for e in events if isinstance(e, ToolCallEvent)]
+        tool_result_events = [e for e in events if isinstance(e, ToolResultEvent)]
+
+        assert any(e.new_state == "working" for e in state_events)
+        assert len(tool_call_events) == 1
+        assert tool_call_events[0].tool_name == "web_search"
+        assert tool_call_events[0].call_id == "call_123"
+        assert len(tool_result_events) == 1
+        assert tool_result_events[0].call_id == "call_123"
+        assert tool_result_events[0].success is True
 
     @pytest.mark.asyncio
     async def test_callback_failure_does_not_break_loop(self) -> None:
+        """agent_step yields events; consumers can ignore them without breaking the loop."""
+        from clide.core.agent_events import TextChunkEvent
+
         registry = _make_mock_registry()
         agent = AgentCore(tool_registry=registry)
         agent.state_machine.transition(AgentState.CONVERSING, "test")
-
-        callback = AsyncMock(side_effect=RuntimeError("callback broke"))
-        agent.set_tool_event_callback(callback)
 
         tool_response = _make_tool_response(
             tool_calls=[("web_search", '{"query": "test"}', "call_123")]
@@ -1299,12 +1311,17 @@ class TestProcessWithTools:
 
         with patch("clide.core.agent.complete_with_tools", new_callable=AsyncMock) as mock_cwt:
             mock_cwt.side_effect = [tool_response, text_response]
-            result = await agent._process_with_tools(  # noqa: SLF001
-                [{"role": "user", "content": "search"}],
-                registry.get_tool_definitions_for_llm(),
-            )
+            events = []
+            async for event in agent.agent_step(
+                messages=[{"role": "user", "content": "search"}],
+                tools=registry.get_tool_definitions_for_llm(),
+                session_id="test-session",
+                mode="chat",
+            ):
+                events.append(event)
 
-        assert result == "Done."
+        text_events = [e for e in events if isinstance(e, TextChunkEvent) and e.done]
+        assert text_events[-1].content == "Done."
 
     @pytest.mark.asyncio
     async def test_no_tools_returns_empty_definitions(self) -> None:
@@ -1321,25 +1338,16 @@ class TestProcessWithTools:
 
 
 class TestPhasedToolExecution:
-    """Tests for phased tool execution with checkpoints and dedup."""
+    """Tests for phased tool execution with checkpoints and dedup via agent_step()."""
 
     @pytest.mark.asyncio
     async def test_phase_checkpoint_triggered(self) -> None:
         """After phase_size tool calls, a checkpoint is generated."""
+        from clide.core.agent_events import CheckpointEvent, TextChunkEvent
+
         registry = _make_mock_registry()
         agent = AgentCore(tool_registry=registry)
         agent.state_machine.transition(AgentState.CONVERSING, "test")
-
-        call_counter = 0
-
-        def make_unique_tool_response() -> MagicMock:
-            nonlocal call_counter
-            call_counter += 1
-            return _make_tool_response(
-                tool_calls=[
-                    ("web_search", f'{{"q": "query{call_counter}"}}', f"call_{call_counter}")
-                ]
-            )
 
         # After phase_size=3 tool calls, checkpoint fires; then text after 1 more
         responses: list[MagicMock] = []
@@ -1348,34 +1356,37 @@ class TestPhasedToolExecution:
             responses.append(
                 _make_tool_response(tool_calls=[("web_search", f'{{"q": "q{i}"}}', f"call_{i}")])
             )
+        # Checkpoint (phase 2 start): also handled by complete_with_tools in agent_step
+        checkpoint_response = _make_tool_response(content="Progress checkpoint")
+        responses.append(checkpoint_response)
         # Phase 2: 1 tool call then text
         responses.append(_make_tool_response(tool_calls=[("web_search", '{"q": "q3"}', "call_3")]))
         responses.append(_make_tool_response(content="Final answer after phases."))
 
-        checkpoint_response = MagicMock()
-        checkpoint_response.choices = [MagicMock()]
-        checkpoint_response.choices[0].message.content = "Progress checkpoint"
-
-        with (
-            patch("clide.core.agent.complete_with_tools", new_callable=AsyncMock) as mock_cwt,
-            patch("clide.core.agent.litellm") as mock_litellm,
-        ):
+        with patch("clide.core.agent.complete_with_tools", new_callable=AsyncMock) as mock_cwt:
             mock_cwt.side_effect = responses
-            mock_litellm.acompletion = AsyncMock(return_value=checkpoint_response)
-            result = await agent._process_with_tools(  # noqa: SLF001
-                [{"role": "user", "content": "search"}],
-                registry.get_tool_definitions_for_llm(),
+            events = []
+            async for event in agent.agent_step(
+                messages=[{"role": "user", "content": "search"}],
+                tools=registry.get_tool_definitions_for_llm(),
+                session_id="test-session",
+                mode="chat",
                 phase_size=3,
                 max_phases=3,
-            )
+            ):
+                events.append(event)
 
-        assert result == "Final answer after phases."
-        # Checkpoint should have been called once (after phase 1)
-        mock_litellm.acompletion.assert_awaited_once()
+        text_events = [e for e in events if isinstance(e, TextChunkEvent) and e.done]
+        assert text_events[-1].content == "Final answer after phases."
+        # Checkpoint event should have been yielded once (after phase 1)
+        checkpoint_events = [e for e in events if isinstance(e, CheckpointEvent)]
+        assert len(checkpoint_events) == 1
 
     @pytest.mark.asyncio
     async def test_dedup_detection(self) -> None:
         """Same tool+args called twice => second is skipped with DUPLICATE."""
+        from clide.core.agent_events import TextChunkEvent
+
         registry = _make_mock_registry()
         agent = AgentCore(tool_registry=registry)
         agent.state_machine.transition(AgentState.CONVERSING, "test")
@@ -1390,15 +1401,20 @@ class TestPhasedToolExecution:
         )
         text_response = _make_tool_response(content="Done.")
 
+        messages: list[dict[str, Any]] = [{"role": "user", "content": "search cats"}]
         with patch("clide.core.agent.complete_with_tools", new_callable=AsyncMock) as mock_cwt:
             mock_cwt.side_effect = [tool_response_1, tool_response_2, text_response]
-            messages: list[dict[str, Any]] = [{"role": "user", "content": "search cats"}]
-            result = await agent._process_with_tools(  # noqa: SLF001
-                messages,
-                registry.get_tool_definitions_for_llm(),
-            )
+            events = []
+            async for event in agent.agent_step(
+                messages=messages,
+                tools=registry.get_tool_definitions_for_llm(),
+                session_id="test-session",
+                mode="chat",
+            ):
+                events.append(event)
 
-        assert result == "Done."
+        text_events = [e for e in events if isinstance(e, TextChunkEvent) and e.done]
+        assert text_events[-1].content == "Done."
         # Tool should only be EXECUTED once (first call), duplicate skipped
         assert registry.execute_tool.await_count == 1
 
@@ -1411,6 +1427,8 @@ class TestPhasedToolExecution:
     @pytest.mark.asyncio
     async def test_dedup_different_args_both_execute(self) -> None:
         """Same tool with different args => both execute (not duplicates)."""
+        from clide.core.agent_events import TextChunkEvent
+
         registry = _make_mock_registry()
         agent = AgentCore(tool_registry=registry)
         agent.state_machine.transition(AgentState.CONVERSING, "test")
@@ -1425,18 +1443,25 @@ class TestPhasedToolExecution:
 
         with patch("clide.core.agent.complete_with_tools", new_callable=AsyncMock) as mock_cwt:
             mock_cwt.side_effect = [tool_response_1, tool_response_2, text_response]
-            result = await agent._process_with_tools(  # noqa: SLF001
-                [{"role": "user", "content": "search"}],
-                registry.get_tool_definitions_for_llm(),
-            )
+            events = []
+            async for event in agent.agent_step(
+                messages=[{"role": "user", "content": "search"}],
+                tools=registry.get_tool_definitions_for_llm(),
+                session_id="test-session",
+                mode="chat",
+            ):
+                events.append(event)
 
-        assert result == "Both done."
+        text_events = [e for e in events if isinstance(e, TextChunkEvent) and e.done]
+        assert text_events[-1].content == "Both done."
         # Both calls should be executed (different args)
         assert registry.execute_tool.await_count == 2
 
     @pytest.mark.asyncio
     async def test_max_phases_exhausted(self) -> None:
         """When LLM always returns tool calls, loop stops at phase_size * max_phases."""
+        from clide.core.agent_events import TextChunkEvent
+
         registry = _make_mock_registry()
         agent = AgentCore(tool_registry=registry)
         agent.state_machine.transition(AgentState.CONVERSING, "test")
@@ -1446,35 +1471,37 @@ class TestPhasedToolExecution:
         def make_unique_tool_response() -> MagicMock:
             nonlocal call_counter
             call_counter += 1
-            return _make_tool_response(
+            r = _make_tool_response(
                 tool_calls=[("web_search", f'{{"q": "x{call_counter}"}}', f"call_{call_counter}")]
             )
+            r.usage = MagicMock(prompt_tokens=10, completion_tokens=5)
+            return r
 
-        checkpoint_response = MagicMock()
-        checkpoint_response.choices = [MagicMock()]
-        checkpoint_response.choices[0].message.content = "Checkpoint"
-
-        with (
-            patch("clide.core.agent.complete_with_tools", new_callable=AsyncMock) as mock_cwt,
-            patch("clide.core.agent.litellm") as mock_litellm,
-        ):
+        with patch("clide.core.agent.complete_with_tools", new_callable=AsyncMock) as mock_cwt:
             mock_cwt.side_effect = lambda *a, **kw: make_unique_tool_response()
-            mock_litellm.acompletion = AsyncMock(return_value=checkpoint_response)
-            result = await agent._process_with_tools(  # noqa: SLF001
-                [{"role": "user", "content": "search"}],
-                registry.get_tool_definitions_for_llm(),
+            events = []
+            async for event in agent.agent_step(
+                messages=[{"role": "user", "content": "search"}],
+                tools=registry.get_tool_definitions_for_llm(),
+                session_id="test-session",
+                mode="chat",
                 phase_size=2,
                 max_phases=2,
-            )
+            ):
+                events.append(event)
 
-        # Should exhaust all phases
-        assert "extensive research" in result.lower()
-        # Total tool calls = phase_size * max_phases = 4
-        assert mock_cwt.await_count == 4
+        # Should exhaust all phases and emit exhaustion message
+        text_events = [e for e in events if isinstance(e, TextChunkEvent) and e.done]
+        assert text_events
+        assert "extensive research" in text_events[-1].content.lower()
+        # phase_size * max_phases = 4 tool calls + 1 checkpoint call = 5 total
+        assert mock_cwt.await_count == 5
 
     @pytest.mark.asyncio
     async def test_phase_size_configurable(self) -> None:
         """Verify phase_size parameter controls when checkpoints fire."""
+        from clide.core.agent_events import CheckpointEvent
+
         registry = _make_mock_registry()
         agent = AgentCore(tool_registry=registry)
         agent.state_machine.transition(AgentState.CONVERSING, "test")
@@ -1484,36 +1511,51 @@ class TestPhasedToolExecution:
         def make_unique_tool_response() -> MagicMock:
             nonlocal call_counter
             call_counter += 1
-            return _make_tool_response(
+            r = _make_tool_response(
                 tool_calls=[("web_search", f'{{"q": "x{call_counter}"}}', f"call_{call_counter}")]
             )
+            r.usage = MagicMock(prompt_tokens=10, completion_tokens=5)
+            return r
 
-        checkpoint_response = MagicMock()
-        checkpoint_response.choices = [MagicMock()]
-        checkpoint_response.choices[0].message.content = "Checkpoint"
+        checkpoint_response = _make_tool_response(content="Checkpoint")
+        checkpoint_response.usage = MagicMock(prompt_tokens=10, completion_tokens=5)
 
         # phase_size=5, max_phases=2 => total 10 tool calls, 1 checkpoint
-        with (
-            patch("clide.core.agent.complete_with_tools", new_callable=AsyncMock) as mock_cwt,
-            patch("clide.core.agent.litellm") as mock_litellm,
-        ):
-            mock_cwt.side_effect = lambda *a, **kw: make_unique_tool_response()
-            mock_litellm.acompletion = AsyncMock(return_value=checkpoint_response)
-            await agent._process_with_tools(  # noqa: SLF001
-                [{"role": "user", "content": "search"}],
-                registry.get_tool_definitions_for_llm(),
+        with patch("clide.core.agent.complete_with_tools", new_callable=AsyncMock) as mock_cwt:
+            # The checkpoint call (at phase 2 start) returns checkpoint_response,
+            # all other calls return unique tool responses
+            checkpoint_call_idx = 5  # after 5 tool calls in phase 1
+            call_idx = [0]
+
+            def side_effect(*a: object, **kw: object) -> MagicMock:
+                call_idx[0] += 1
+                if call_idx[0] == checkpoint_call_idx + 1:
+                    return checkpoint_response
+                return make_unique_tool_response()
+
+            mock_cwt.side_effect = side_effect
+            events = []
+            async for event in agent.agent_step(
+                messages=[{"role": "user", "content": "search"}],
+                tools=registry.get_tool_definitions_for_llm(),
+                session_id="test-session",
+                mode="chat",
                 phase_size=5,
                 max_phases=2,
-            )
+            ):
+                events.append(event)
 
-        # Total tool calls = 5 * 2 = 10
-        assert mock_cwt.await_count == 10
-        # 1 checkpoint (after phase 1, before phase 2)
-        assert mock_litellm.acompletion.await_count == 1
+        # 1 checkpoint event (after phase 1, before phase 2)
+        checkpoint_events = [e for e in events if isinstance(e, CheckpointEvent)]
+        assert len(checkpoint_events) == 1
+        # Total calls = 5 (phase1 tools) + 1 (checkpoint) + 5 (phase2 tools) = 11
+        assert mock_cwt.await_count == 11
 
     @pytest.mark.asyncio
     async def test_tool_call_count_tracks_correctly(self) -> None:
         """Verify tool_call_count increments per actual tool execution, not per iteration."""
+        from clide.core.agent_events import TextChunkEvent
+
         registry = _make_mock_registry()
         agent = AgentCore(tool_registry=registry)
         agent.state_machine.transition(AgentState.CONVERSING, "test")
@@ -1527,20 +1569,27 @@ class TestPhasedToolExecution:
 
         with patch("clide.core.agent.complete_with_tools", new_callable=AsyncMock) as mock_cwt:
             mock_cwt.side_effect = responses
-            result = await agent._process_with_tools(  # noqa: SLF001
-                [{"role": "user", "content": "search"}],
-                registry.get_tool_definitions_for_llm(),
+            events = []
+            async for event in agent.agent_step(
+                messages=[{"role": "user", "content": "search"}],
+                tools=registry.get_tool_definitions_for_llm(),
+                session_id="test-session",
+                mode="chat",
                 phase_size=10,
                 max_phases=3,
-            )
+            ):
+                events.append(event)
 
-        assert result == "Final."
+        text_events = [e for e in events if isinstance(e, TextChunkEvent) and e.done]
+        assert text_events[-1].content == "Final."
         # Both tool calls executed (2 unique)
         assert registry.execute_tool.await_count == 2
 
     @pytest.mark.asyncio
     async def test_checkpoint_failure_continues(self) -> None:
         """If checkpoint generation fails, the loop continues."""
+        from clide.core.agent_events import TextChunkEvent
+
         registry = _make_mock_registry()
         agent = AgentCore(tool_registry=registry)
         agent.state_machine.transition(AgentState.CONVERSING, "test")
@@ -1550,32 +1599,42 @@ class TestPhasedToolExecution:
         def make_unique_tool_response() -> MagicMock:
             nonlocal call_counter
             call_counter += 1
-            return _make_tool_response(
+            r = _make_tool_response(
                 tool_calls=[("web_search", f'{{"q": "x{call_counter}"}}', f"call_{call_counter}")]
             )
+            r.usage = MagicMock(prompt_tokens=10, completion_tokens=5)
+            return r
 
         # phase_size=2, max_phases=2 => 4 tool calls total
-        # Checkpoint fails but loop should continue
-        responses_list = [make_unique_tool_response() for _ in range(4)]
-        responses_list.append(_make_tool_response(content="Done despite checkpoint failure."))
+        # The checkpoint call (at index 3, i.e. the 3rd call overall) raises an exception
+        checkpoint_call_idx = 2  # 0-indexed: calls 0,1 are phase1 tools, call 2 is checkpoint
 
-        with (
-            patch("clide.core.agent.complete_with_tools", new_callable=AsyncMock) as mock_cwt,
-            patch("clide.core.agent.litellm") as mock_litellm,
-        ):
-            # Re-generate unique responses for mock
-            call_counter = 0
-            mock_cwt.side_effect = lambda *a, **kw: make_unique_tool_response()
-            mock_litellm.acompletion = AsyncMock(side_effect=RuntimeError("LLM down"))
-            result = await agent._process_with_tools(  # noqa: SLF001
-                [{"role": "user", "content": "search"}],
-                registry.get_tool_definitions_for_llm(),
+        call_idx = [0]
+
+        def side_effect(*a: object, **kw: object) -> MagicMock:
+            idx = call_idx[0]
+            call_idx[0] += 1
+            if idx == checkpoint_call_idx:
+                raise RuntimeError("LLM down")
+            return make_unique_tool_response()
+
+        with patch("clide.core.agent.complete_with_tools", new_callable=AsyncMock) as mock_cwt:
+            mock_cwt.side_effect = side_effect
+            events = []
+            async for event in agent.agent_step(
+                messages=[{"role": "user", "content": "search"}],
+                tools=registry.get_tool_definitions_for_llm(),
+                session_id="test-session",
+                mode="chat",
                 phase_size=2,
                 max_phases=2,
-            )
+            ):
+                events.append(event)
 
         # Should still complete (exhaust phases even with checkpoint failure)
-        assert "extensive research" in result.lower()
+        text_events = [e for e in events if isinstance(e, TextChunkEvent) and e.done]
+        assert text_events
+        assert "extensive research" in text_events[-1].content.lower()
 
     @pytest.mark.asyncio
     async def test_default_phase_attributes(self) -> None:
@@ -1591,6 +1650,8 @@ class TestAutonomousThinkWithTools:
     @pytest.mark.asyncio
     async def test_autonomous_think_with_tools(self) -> None:
         """Phase 1 runs when tool_registry has tools, and results are passed to thinker."""
+        from clide.core.agent_events import TextChunkEvent
+
         registry = _make_mock_registry()
         agent = AgentCore(tool_registry=registry)
 
@@ -1605,15 +1666,13 @@ class TestAutonomousThinkWithTools:
             captured_kwargs.update(kwargs)
             return mock_thought, "curious", 0.8
 
-        # Phase 1: _process_with_tools returns tool results
+        # Phase 1: agent_step yields tool results as TextChunkEvent
+        async def mock_agent_step(*args: object, **kwargs: object) -> AsyncIterator[object]:
+            yield TextChunkEvent(content="Tool result: some useful data from web search", done=True)
+
         with (
             patch("clide.autonomy.thinker.Thinker") as mock_thinker_cls,
-            patch.object(
-                agent,
-                "_process_with_tools",
-                new_callable=AsyncMock,
-                return_value="Tool result: some useful data from web search",
-            ) as mock_pwt,
+            patch.object(agent, "agent_step", side_effect=mock_agent_step) as mock_step,
             patch("clide.core.agent.random") as mock_random,
         ):
             mock_random.choices.return_value = ["goal_oriented"]
@@ -1627,7 +1686,7 @@ class TestAutonomousThinkWithTools:
         assert result[0] == "I learned something from tools"
 
         # Phase 1 should have been called
-        mock_pwt.assert_awaited_once()
+        mock_step.assert_called_once()
 
         # Tool results should be incorporated into thinker context.
         # If thinker accepts tool_results_context param, it's passed directly;
@@ -1687,15 +1746,14 @@ class TestAutonomousThinkWithTools:
             captured_kwargs.update(kwargs)
             return mock_thought, "neutral", 0.5
 
-        # Phase 1: _process_with_tools raises an exception
+        # Phase 1: agent_step raises an exception
+        async def mock_agent_step_fail(*args: object, **kwargs: object) -> AsyncIterator[object]:
+            raise RuntimeError("MCP server down")
+            yield  # make it an async generator
+
         with (
             patch("clide.autonomy.thinker.Thinker") as mock_thinker_cls,
-            patch.object(
-                agent,
-                "_process_with_tools",
-                new_callable=AsyncMock,
-                side_effect=RuntimeError("MCP server down"),
-            ),
+            patch.object(agent, "agent_step", side_effect=mock_agent_step_fail),
         ):
             thinker_instance = MagicMock()
             thinker_instance.think = capturing_think

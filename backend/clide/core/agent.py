@@ -8,14 +8,22 @@ import inspect
 import json as json_mod
 import logging
 import random
+import uuid
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
-import litellm
-
 from clide.api.schemas import AgentState
 from clide.autonomy.models import ThoughtType
+from clide.core.agent_events import (
+    AgentStepEvent,
+    CheckpointEvent,
+    LLMCallEvent,
+    StateChangeEvent,
+    TextChunkEvent,
+    ToolCallEvent,
+    ToolResultEvent,
+)
 from clide.core.llm import LLMConfig, _build_model_name, complete_with_tools, stream_completion
 from clide.core.prompts import build_system_prompt
 from clide.core.state import StateMachine
@@ -23,8 +31,10 @@ from clide.core.state import StateMachine
 if TYPE_CHECKING:
     from clide.autonomy.goals import GoalManager
     from clide.character.character import Character
+    from clide.core.context_builder import ContextBuilder
     from clide.core.conversation_store import ConversationStore
     from clide.core.cost import CostTracker
+    from clide.core.event_log import EventLog
     from clide.memory.amem import AMem
     from clide.tools.registry import ToolRegistry
 
@@ -79,22 +89,53 @@ class AgentCore:
         self._persona_settings: Any = None  # PersonaSettings from config
         self._agent_name: str = "Clide"
         self._last_thought_metadata: dict[str, str] = {}
+        self.event_log: EventLog | None = None
+        self.context_builder: ContextBuilder | None = None
 
     @staticmethod
     def _format_age(dt: datetime) -> str:
         """Format a datetime as a human-readable relative age string."""
-        now = datetime.now(UTC)
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=UTC)
-        age = now - dt
-        if age.days > 0:
-            return f"{age.days}d ago"
-        elif age.seconds >= 3600:
-            return f"{age.seconds // 3600}h ago"
-        elif age.seconds >= 60:
-            return f"{age.seconds // 60}m ago"
-        else:
-            return "just now"
+        from .context_builder import format_age
+        return format_age(dt)
+
+    @staticmethod
+    def _make_session_id() -> str:
+        """Generate a unique session ID for event log grouping."""
+        return str(uuid.uuid4())
+
+    @staticmethod
+    def _event_to_dict(event: AgentStepEvent) -> dict[str, Any]:
+        """Convert a typed AgentStepEvent to the legacy raw-dict format."""
+        if isinstance(event, ToolCallEvent):
+            return {
+                "tool_call": True,
+                "tool_name": event.tool_name,
+                "arguments": event.arguments,
+                "call_id": event.call_id,
+            }
+        if isinstance(event, ToolResultEvent):
+            return {
+                "tool_result": True,
+                "call_id": event.call_id,
+                "result": event.result,
+                "error": event.error,
+                "success": event.success,
+            }
+        if isinstance(event, CheckpointEvent):
+            return {
+                "checkpoint": True,
+                "content": event.content,
+                "phase": event.phase,
+                "total_phases": event.total_phases,
+            }
+        if isinstance(event, StateChangeEvent):
+            return {
+                "state_change": True,
+                "previous_state": event.previous_state,
+                "new_state": event.new_state,
+                "reason": event.reason,
+            }
+        return {}
 
     def get_state(self) -> AgentState:
         """Get current agent state."""
@@ -195,26 +236,50 @@ class AgentCore:
             # Fallback: simple trimming
             self.conversation_history = self.conversation_history[-self._max_history_length :]
 
-    async def _process_with_tools(
+    async def agent_step(
         self,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]],
+        session_id: str,
+        mode: str,
         phase_size: int = 10,
         max_phases: int = 3,
-    ) -> str:
-        """Execute the agentic tool loop with phased checkpoints.
+        purpose: str = "tool_loop",
+    ) -> AsyncIterator[AgentStepEvent]:
+        """Unified agent execution step — the single LLM interaction primitive.
 
-        Every ``phase_size`` tool calls, forces a text checkpoint where the LLM
-        summarises progress and plans next steps.  Also detects duplicate tool
-        calls (same name + args) and skips them with a warning message.
+        Handles both streaming (no tools) and tool-calling (with tools) paths.
+        Yields typed AgentStepEvent objects. Writes all events to the EventLog
+        if one is configured.
 
-        Returns the final text response.
+        This method replaces both _process_with_tools and direct stream_completion
+        calls. Chat, workshop, and thinking modes all use this as their execution
+        primitive.
         """
+        if not tools:
+            self._ensure_valid_message_order(messages)
+            full_text = ""
+            async for chunk in stream_completion(messages, self.llm_config):
+                full_text += chunk
+                yield TextChunkEvent(content=chunk)
+            yield TextChunkEvent(content="", done=True)
+            if self.event_log:
+                await self.event_log.append(
+                    session_id=session_id,
+                    mode=mode,
+                    event_type="assistant_message",
+                    role="assistant",
+                    content=full_text,
+                    metadata={"purpose": purpose},
+                )
+            return
+
+        # With-tools path: phased tool loop
         tool_call_count = 0
-        seen_calls: set[str] = set()  # Track "tool_name:args" for dedup
+        seen_calls: set[str] = set()
 
         for current_phase in range(1, max_phases + 1):
-            # --- Phase checkpoint (between phases, not before the first) ---
+            # Phase checkpoint (between phases, not before the first)
             if current_phase > 1:
                 logger.info(
                     "Tool phase %d checkpoint (after %d calls)",
@@ -229,39 +294,34 @@ class AgentCore:
                 messages.append({"role": "user", "content": checkpoint_prompt})
 
                 try:
-                    model_name = _build_model_name(self.llm_config)
-                    checkpoint_kwargs: dict[str, Any] = {
-                        "model": model_name,
-                        "messages": messages,
-                        "max_tokens": 200,
-                        "stream": False,
-                    }
-                    if self.llm_config.api_base:
-                        checkpoint_kwargs["api_base"] = self.llm_config.api_base
-
-                    checkpoint_response = await litellm.acompletion(**checkpoint_kwargs)
+                    checkpoint_response = await complete_with_tools(
+                        messages, self.llm_config, tools
+                    )
                     checkpoint_text = checkpoint_response.choices[0].message.content or ""
                     messages.append({"role": "assistant", "content": checkpoint_text})
 
-                    # Broadcast checkpoint via callback
-                    if self._tool_event_callback:
-                        try:
-                            await self._tool_event_callback(
-                                {
-                                    "checkpoint": True,
-                                    "content": checkpoint_text,
-                                    "phase": current_phase - 1,
-                                    "total_phases": max_phases,
-                                    "tool_call_count": tool_call_count,
-                                }
-                            )
-                        except Exception:
-                            logger.warning("Checkpoint callback failed", exc_info=True)
+                    event: AgentStepEvent = CheckpointEvent(
+                        content=checkpoint_text,
+                        phase=current_phase - 1,
+                        total_phases=max_phases,
+                    )
+                    yield event
+                    if self.event_log:
+                        await self.event_log.append(
+                            session_id,
+                            mode,
+                            "tool_checkpoint",
+                            content=checkpoint_text,
+                            metadata={
+                                "phase": current_phase - 1,
+                                "total_phases": max_phases,
+                            },
+                        )
 
                 except Exception:
                     logger.warning("Checkpoint generation failed", exc_info=True)
 
-            # --- Inner loop: up to phase_size tool calls per phase ---
+            # Inner loop: up to phase_size tool calls per phase
             phase_tool_count = 0
             for _step in range(phase_size):
                 logger.info(
@@ -281,10 +341,14 @@ class AgentCore:
                         phase_tool_count + 1,
                     )
                     if tool_call_count > 0:
-                        return (
-                            "I used some tools but couldn't finish processing the results. "
-                            "The tool results are shown above — you can ask me to try again."
+                        yield TextChunkEvent(
+                            content=(
+                                "I used some tools but couldn't finish processing the results. "
+                                "The tool results are shown above — you can ask me to try again."
+                            ),
+                            done=True,
                         )
+                        return
                     raise
 
                 choice = response.choices[0]
@@ -297,6 +361,15 @@ class AgentCore:
                     bool(choice.message.content),
                 )
 
+                # Yield LLMCallEvent with usage info
+                usage = getattr(response, "usage", None)
+                yield LLMCallEvent(
+                    model=_build_model_name(self.llm_config),
+                    prompt_tokens=getattr(usage, "prompt_tokens", 0) if usage else 0,
+                    completion_tokens=getattr(usage, "completion_tokens", 0) if usage else 0,
+                    purpose=purpose,
+                )
+
                 # Check if LLM wants to call tools
                 if choice.finish_reason == "tool_calls" and choice.message.tool_calls:
                     logger.info(
@@ -304,19 +377,15 @@ class AgentCore:
                         len(choice.message.tool_calls),
                     )
 
-                    # Transition to WORKING and broadcast state change
+                    # Transition to WORKING
                     if self.state_machine.can_transition(AgentState.WORKING):
+                        prev = self.state_machine.state.value
                         self.state_machine.transition(AgentState.WORKING, "tool call")
-                        if self._tool_event_callback:
-                            with contextlib.suppress(Exception):
-                                await self._tool_event_callback(
-                                    {
-                                        "state_change": True,
-                                        "previous_state": "conversing",
-                                        "new_state": "working",
-                                        "reason": "tool call",
-                                    }
-                                )
+                        yield StateChangeEvent(
+                            previous_state=prev,
+                            new_state="working",
+                            reason="tool call",
+                        )
 
                     # Append assistant message with tool calls
                     messages.append(choice.message.model_dump())
@@ -335,7 +404,7 @@ class AgentCore:
                             arguments = {}
                         call_id = tool_call.id
 
-                        # --- Dedup check ---
+                        # Dedup check
                         args_str = (
                             func.arguments
                             if isinstance(func.arguments, str)
@@ -371,19 +440,23 @@ class AgentCore:
                             str(arguments)[:200],
                         )
 
-                        # Broadcast tool call BEFORE execution (shows "executing" state)
-                        if self._tool_event_callback:
-                            try:
-                                await self._tool_event_callback(
-                                    {
-                                        "tool_call": True,
-                                        "tool_name": tool_name,
-                                        "arguments": arguments,
-                                        "call_id": call_id,
-                                    }
-                                )
-                            except Exception:
-                                logger.warning("Tool call callback failed", exc_info=True)
+                        # Yield ToolCallEvent BEFORE execution
+                        yield ToolCallEvent(
+                            tool_name=tool_name,
+                            arguments=arguments,
+                            call_id=call_id,
+                        )
+                        if self.event_log:
+                            await self.event_log.append(
+                                session_id,
+                                mode,
+                                "tool_call",
+                                content=tool_name,
+                                metadata={
+                                    "call_id": call_id,
+                                    "arguments": json_mod.dumps(arguments),
+                                },
+                            )
 
                         # Execute via registry
                         assert self.tool_registry is not None
@@ -398,20 +471,30 @@ class AgentCore:
                             else f"ERROR: {result.error}",
                         )
 
-                        # Broadcast tool result AFTER execution
-                        if self._tool_event_callback:
-                            try:
-                                await self._tool_event_callback(
-                                    {
-                                        "tool_result": True,
-                                        "call_id": call_id,
-                                        "result": result.result if result.success else None,
-                                        "error": result.error if not result.success else None,
-                                        "success": result.success,
-                                    }
-                                )
-                            except Exception:
-                                logger.warning("Tool result callback failed", exc_info=True)
+                        # Yield ToolResultEvent AFTER execution
+                        yield ToolResultEvent(
+                            call_id=call_id,
+                            result=result.result if result.success else None,
+                            error=result.error if not result.success else None,
+                            success=result.success,
+                        )
+                        if self.event_log:
+                            result_preview = (
+                                str(result.result)[:500]
+                                if result.success
+                                else f"Error: {result.error}"
+                            )
+                            await self.event_log.append(
+                                session_id,
+                                mode,
+                                "tool_result",
+                                content=result_preview,
+                                metadata={
+                                    "call_id": call_id,
+                                    "success": result.success,
+                                    "error": result.error,
+                                },
+                            )
 
                         # Append tool result message for LLM
                         result_content = (
@@ -430,19 +513,14 @@ class AgentCore:
                         tool_call_count += 1
                         phase_tool_count += 1
 
-                    # Transition back to CONVERSING and broadcast
+                    # Transition back to CONVERSING
                     if self.state_machine.state == AgentState.WORKING:
                         self.state_machine.transition(AgentState.CONVERSING, "tool results ready")
-                        if self._tool_event_callback:
-                            with contextlib.suppress(Exception):
-                                await self._tool_event_callback(
-                                    {
-                                        "state_change": True,
-                                        "previous_state": "working",
-                                        "new_state": "conversing",
-                                        "reason": "tool results ready",
-                                    }
-                                )
+                        yield StateChangeEvent(
+                            previous_state="working",
+                            new_state="conversing",
+                            reason="tool results ready",
+                        )
 
                     # Loop: call LLM again with tool results
                     continue
@@ -456,7 +534,20 @@ class AgentCore:
                         tool_call_count,
                         len(text),
                     )
-                    return text
+                    yield TextChunkEvent(content=text, done=True)
+                    if self.event_log:
+                        await self.event_log.append(
+                            session_id,
+                            mode,
+                            "assistant_message",
+                            role="assistant",
+                            content=text,
+                            metadata={
+                                "purpose": purpose,
+                                "tool_calls_total": tool_call_count,
+                            },
+                        )
+                    return
 
         # Max phases exhausted
         logger.warning(
@@ -464,10 +555,21 @@ class AgentCore:
             max_phases,
             tool_call_count,
         )
-        return (
+        fallback = (
             "I've done extensive research with multiple tool calls. Let me summarize what I found."
         )
+        yield TextChunkEvent(content=fallback, done=True)
+        if self.event_log:
+            await self.event_log.append(
+                session_id,
+                mode,
+                "assistant_message",
+                role="assistant",
+                content=fallback,
+                metadata={"purpose": purpose, "exhausted": True},
+            )
 
+    # _process_with_tools removed — replaced by agent_step()
     async def process_message(self, content: str) -> AsyncIterator[str]:
         """Process a user message and yield response chunks.
 
@@ -475,15 +577,24 @@ class AgentCore:
         Uses memory recall, character personality, and cost tracking when available.
         """
         # Load persisted history on first message
-        if not self._history_loaded and self.conversation_store:
+        if not self._history_loaded:
             try:
-                self.conversation_history = await self.conversation_store.get_for_llm(
-                    limit=self._max_history_length
-                )
-                logger.info(
-                    "Loaded %d messages from conversation store",
-                    len(self.conversation_history),
-                )
+                if self.event_log:
+                    self.conversation_history = await self.event_log.get_for_llm_context(
+                        limit=self._max_history_length
+                    )
+                    logger.info(
+                        "Loaded %d messages from event log",
+                        len(self.conversation_history),
+                    )
+                elif self.conversation_store:
+                    self.conversation_history = await self.conversation_store.get_for_llm(
+                        limit=self._max_history_length
+                    )
+                    logger.info(
+                        "Loaded %d messages from conversation store (fallback)",
+                        len(self.conversation_history),
+                    )
             except Exception:
                 logger.warning("Failed to load conversation history", exc_info=True)
             self._history_loaded = True
@@ -617,7 +728,22 @@ class AgentCore:
 
         # Recall relevant memories
         memory_context = ""
-        if self.amem:
+        cross_mode_context = ""
+        if self.context_builder:
+            try:
+                ctx = await self.context_builder.build(
+                    query=content,
+                    current_mode="chat",
+                    memory_limit=5,
+                    event_limit=5,
+                )
+                memory_context = ctx.memory_text
+                cross_mode_context = ctx.cross_mode_text
+                if ctx.memories_used:
+                    logger.info("Recalled %d memories for context", ctx.memories_used)
+            except Exception:
+                logger.warning("Context builder failed", exc_info=True)
+        elif self.amem:
             try:
                 relevant = await self.amem.recall(content, limit=5)
                 if relevant:
@@ -626,10 +752,8 @@ class AgentCore:
                         f"- {z.summary or z.content[:100]} [{self._format_age(z.created_at)}]"
                         for z in relevant
                     )
-                else:
-                    logger.debug("No memories found")
             except Exception:
-                logger.warning("Failed to recall memories", exc_info=True)
+                logger.warning("Memory recall failed", exc_info=True)
 
         # Build enhanced system prompt
         personality = ""
@@ -646,6 +770,7 @@ class AgentCore:
             agent_born_at=self.born_at,
             tool_skills=tool_skills if tool_skills else None,
             reward_context=reward_context,
+            cross_mode_context=cross_mode_context,
         )
 
         # Build messages for LLM (with persona reinforcement)
@@ -664,24 +789,43 @@ class AgentCore:
             logger.debug("No tool registry configured")
 
         full_response = ""
-        if tool_definitions:
-            # TOOL-AWARE PATH: non-streaming with tool loop
-            logger.info("Using tool-aware path (%d tools)", len(tool_definitions))
-            self._ensure_valid_message_order(messages)
-            full_response = await self._process_with_tools(
-                messages,
-                tool_definitions,
-                phase_size=self.tool_phase_size,
-                max_phases=self.tool_max_phases,
-            )
-            yield full_response
-        else:
-            # SIMPLE PATH: streaming without tools (existing behavior)
-            logger.info("Streaming LLM response (no tools)...")
-            self._ensure_valid_message_order(messages)
-            async for chunk in stream_completion(messages, self.llm_config):
-                full_response += chunk
-                yield chunk
+        session_id = self._make_session_id()
+
+        # Log user message to event log
+        if self.event_log:
+            try:
+                await self.event_log.append(
+                    session_id=session_id,
+                    mode="chat",
+                    event_type="user_message",
+                    role="user",
+                    content=content,
+                )
+            except Exception:
+                logger.warning("Failed to log user message to event log", exc_info=True)
+
+        logger.info(
+            "Processing message via agent_step (%d tools)",
+            len(tool_definitions),
+        )
+        async for event in self.agent_step(
+            messages=messages,
+            tools=tool_definitions,
+            session_id=session_id,
+            mode="chat",
+            phase_size=self.tool_phase_size,
+            max_phases=self.tool_max_phases,
+            purpose="chat",
+        ):
+            if isinstance(event, TextChunkEvent):
+                if event.content:
+                    full_response += event.content
+                    yield event.content
+            elif isinstance(
+                event, (ToolCallEvent, ToolResultEvent, CheckpointEvent, StateChangeEvent)
+            ) and self._tool_event_callback:
+                with contextlib.suppress(Exception):
+                    await self._tool_event_callback(self._event_to_dict(event))
 
         logger.info("LLM response complete (%d chars)", len(full_response))
 
@@ -886,6 +1030,7 @@ class AgentCore:
 
         logger.info("Starting autonomous thinking cycle...")
         self.state_machine.transition(AgentState.THINKING, "scheduled thinking cycle")
+        think_session_id = self._make_session_id()
 
         try:
             thinker = Thinker(llm_config=self.llm_config)
@@ -945,7 +1090,18 @@ class AgentCore:
                         elif topic:
                             topic_query = topic
 
-            if self.amem:
+            if self.context_builder:
+                try:
+                    ctx = await self.context_builder.build(
+                        query=topic_query,
+                        current_mode="thinking",
+                        memory_limit=10,
+                        event_limit=5,
+                    )
+                    memory_context = ctx.memory_text
+                except Exception:
+                    logger.warning("Context builder failed in thinking", exc_info=True)
+            elif self.amem:
                 with contextlib.suppress(Exception):
                     relevant = await self.amem.recall(topic_query, limit=10)
                     memory_context = "\n".join(
@@ -1061,7 +1217,23 @@ class AgentCore:
                     ]
 
                     try:
-                        tool_response = await self._process_with_tools(tool_messages, tool_defs)
+                        tool_response = ""
+                        async for event in self.agent_step(
+                            messages=tool_messages,
+                            tools=tool_defs,
+                            session_id=think_session_id,
+                            mode="thinking",
+                            purpose="autonomous_tool_exploration",
+                        ):
+                            if isinstance(event, TextChunkEvent) and event.content:
+                                tool_response += event.content
+                            elif isinstance(
+                                event, (ToolCallEvent, ToolResultEvent)
+                            ) and self._tool_event_callback:
+                                with contextlib.suppress(Exception):
+                                    await self._tool_event_callback(
+                                        self._event_to_dict(event)
+                                    )
                         if tool_response and "no tools" not in tool_response.lower():
                             tool_results_context = tool_response
                             logger.info(
@@ -1149,6 +1321,24 @@ class AgentCore:
             # Fire-and-forget: store thought and update character in background
             self._track_task(self._post_thought_tasks(thought, mood, intensity))
 
+            # Log thought to event log
+            if self.event_log:
+                try:
+                    await self.event_log.append(
+                        session_id=think_session_id,
+                        mode="thinking",
+                        event_type="thought",
+                        content=thought.content,
+                        metadata={
+                            "thought_type": thought.thought_type,
+                            "mood": mood,
+                            "intensity": str(intensity),
+                            "topic": thought.metadata.get("topic", ""),
+                        },
+                    )
+                except Exception:
+                    logger.warning("Failed to log thought to event log", exc_info=True)
+
             logger.info("Thought generated (%s): %s", thought_type, thought.content[:100])
             self._last_thought_metadata = thought.metadata
             return thought.content, mood, intensity, thought.thought_type
@@ -1201,6 +1391,8 @@ class AgentCore:
             amem=self.amem,
             agent_name=self._agent_name,
             tool_skills=self._load_tool_skills(),
+            agent_step_fn=self.agent_step,
+            context_builder=self.context_builder,
         )
 
         self._track_task(self._run_workshop())
