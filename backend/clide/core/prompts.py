@@ -19,6 +19,7 @@ def build_system_prompt(
     agent_born_at: datetime | None = None,
     tool_skills: dict[str, str] | None = None,
     reward_context: str = "",
+    cross_mode_context: str = "",
 ) -> str:
     """Build the full system prompt with optional additions.
 
@@ -28,6 +29,7 @@ def build_system_prompt(
         memory_context: Relevant memories to inject
         agent_born_at: When the agent was first created (for age awareness)
         tool_skills: Per-tool skill instructions to inject (tool_name -> instructions)
+        cross_mode_context: Recent activity from other modes (chat/workshop/thinking)
 
     Returns:
         Complete system prompt string
@@ -52,6 +54,9 @@ def build_system_prompt(
 
     if memory_context:
         parts.append(f"\nRelevant memories:\n{memory_context}")
+
+    if cross_mode_context:
+        parts.append(f"\nRecent activity from other modes:\n{cross_mode_context}")
 
     if tool_skills:
         skills_lines = ["## Tool Usage Guidelines\n"]
