@@ -600,6 +600,168 @@ class TestWorkshopRunnerToolExecution:
         await runner._execute_tools_for_step(step)
 
 
+class TestWorkshopStepMemories:
+    """Tests for Phase 10b: workshop step memories."""
+
+    @pytest.mark.asyncio
+    async def test_execute_step_stores_step_memory(self) -> None:
+        """Completed step stores memory with type=workshop_step."""
+        step_json = (
+            '{"inner_dialogue": "Thinking...", "action": "complete", '
+            '"result_summary": "Found the data"}'
+        )
+        mock_response = _make_llm_response(step_json)
+
+        runner = WorkshopRunner(
+            llm_config=LLMConfig(),
+            goal_id="g1",
+            goal_description="Test",
+        )
+        runner.session.plan = WorkshopPlan(objective="test", approach="test", steps=[])
+        runner._store_memory = AsyncMock()  # type: ignore[method-assign]
+
+        step = WorkshopStep(id="s1", description="Find data", status="in_progress")
+
+        with patch("clide.autonomy.workshop.litellm") as mock_litellm:
+            mock_litellm.acompletion = AsyncMock(return_value=mock_response)
+            await runner._execute_step(0, step)
+
+        # Filter calls for workshop_step type
+        step_mem_calls = [
+            c
+            for c in runner._store_memory.call_args_list  # type: ignore[union-attr]
+            if c[1].get("metadata", {}).get("type") == "workshop_step"
+            or (len(c[0]) > 1 and isinstance(c[0][1], dict) and c[0][1].get("type") == "workshop_step")
+        ]
+        assert len(step_mem_calls) == 1
+
+    @pytest.mark.asyncio
+    async def test_execute_step_stores_memory_for_skipped(self) -> None:
+        """Skipped step with a reason also stores memory."""
+        step_json = (
+            '{"inner_dialogue": "Not needed", "action": "skip", '
+            '"skip_reason": "Already covered by step 1"}'
+        )
+        mock_response = _make_llm_response(step_json)
+
+        runner = WorkshopRunner(
+            llm_config=LLMConfig(),
+            goal_id="g1",
+            goal_description="Test",
+        )
+        runner.session.plan = WorkshopPlan(objective="test", approach="test", steps=[])
+        runner._store_memory = AsyncMock()  # type: ignore[method-assign]
+
+        step = WorkshopStep(id="s1", description="Redundant step", status="in_progress")
+
+        with patch("clide.autonomy.workshop.litellm") as mock_litellm:
+            mock_litellm.acompletion = AsyncMock(return_value=mock_response)
+            await runner._execute_step(0, step)
+
+        step_mem_calls = [
+            c
+            for c in runner._store_memory.call_args_list  # type: ignore[union-attr]
+            if (len(c[0]) > 1 and isinstance(c[0][1], dict) and c[0][1].get("type") == "workshop_step")
+        ]
+        assert len(step_mem_calls) == 1
+
+    @pytest.mark.asyncio
+    async def test_execute_step_skips_memory_for_empty_result(self) -> None:
+        """Step with empty result_summary does NOT store memory."""
+        step_json = (
+            '{"inner_dialogue": "Thinking...", "action": "complete", '
+            '"result_summary": ""}'
+        )
+        mock_response = _make_llm_response(step_json)
+
+        runner = WorkshopRunner(
+            llm_config=LLMConfig(),
+            goal_id="g1",
+            goal_description="Test",
+        )
+        runner.session.plan = WorkshopPlan(objective="test", approach="test", steps=[])
+        runner._store_memory = AsyncMock()  # type: ignore[method-assign]
+
+        step = WorkshopStep(id="s1", description="Empty step", status="in_progress")
+
+        with patch("clide.autonomy.workshop.litellm") as mock_litellm:
+            mock_litellm.acompletion = AsyncMock(return_value=mock_response)
+            await runner._execute_step(0, step)
+
+        # No workshop_step memory calls
+        step_mem_calls = [
+            c
+            for c in runner._store_memory.call_args_list  # type: ignore[union-attr]
+            if (len(c[0]) > 1 and isinstance(c[0][1], dict) and c[0][1].get("type") == "workshop_step")
+        ]
+        assert len(step_mem_calls) == 0
+
+
+class TestWorkshopDialogueMemories:
+    """Tests for Phase 10c: workshop inner dialogue memories."""
+
+    @pytest.mark.asyncio
+    async def test_inner_dialogue_stores_long_content(self) -> None:
+        """Content > 100 chars triggers memory storage."""
+        runner = WorkshopRunner(
+            llm_config=LLMConfig(),
+            goal_id="g1",
+            goal_description="Test",
+        )
+        runner._store_memory = AsyncMock()  # type: ignore[method-assign]
+
+        long_content = "A" * 150
+        await runner._inner_dialogue(long_content)
+
+        dialogue_calls = [
+            c
+            for c in runner._store_memory.call_args_list  # type: ignore[union-attr]
+            if (len(c[0]) > 1 and isinstance(c[0][1], dict) and c[0][1].get("type") == "workshop_dialogue")
+        ]
+        assert len(dialogue_calls) == 1
+
+    @pytest.mark.asyncio
+    async def test_inner_dialogue_skips_short_content(self) -> None:
+        """Content < 100 chars does NOT trigger memory storage."""
+        runner = WorkshopRunner(
+            llm_config=LLMConfig(),
+            goal_id="g1",
+            goal_description="Test",
+        )
+        runner._store_memory = AsyncMock()  # type: ignore[method-assign]
+
+        short_content = "Brief thought"
+        await runner._inner_dialogue(short_content)
+
+        dialogue_calls = [
+            c
+            for c in runner._store_memory.call_args_list  # type: ignore[union-attr]
+            if (len(c[0]) > 1 and isinstance(c[0][1], dict) and c[0][1].get("type") == "workshop_dialogue")
+        ]
+        assert len(dialogue_calls) == 0
+
+    @pytest.mark.asyncio
+    async def test_inner_dialogue_caps_at_5_memories(self) -> None:
+        """Only 5 dialogue memories stored even if called more times."""
+        runner = WorkshopRunner(
+            llm_config=LLMConfig(),
+            goal_id="g1",
+            goal_description="Test",
+        )
+        runner._store_memory = AsyncMock()  # type: ignore[method-assign]
+
+        long_content = "B" * 150
+        for _ in range(8):
+            await runner._inner_dialogue(long_content)
+
+        dialogue_calls = [
+            c
+            for c in runner._store_memory.call_args_list  # type: ignore[union-attr]
+            if (len(c[0]) > 1 and isinstance(c[0][1], dict) and c[0][1].get("type") == "workshop_dialogue")
+        ]
+        assert len(dialogue_calls) == 5
+
+
 class TestWorkshopPrompts:
     """Tests for workshop prompt templates."""
 

@@ -174,9 +174,11 @@ class WorkshopRunner:
         self._context_builder = context_builder
         self._cancelled = False
         self._paused = False
+        self._dialogue_memory_count: int = 0
 
     async def run(self) -> None:
         """Main workshop loop: plan -> execute steps -> review."""
+        self._dialogue_memory_count = 0
         try:
             # Phase 1: Generate plan
             plan = await self._generate_plan()
@@ -399,18 +401,30 @@ class WorkshopRunner:
                 step.status = "skipped"
                 step.result_summary = data.get("skip_reason", "Skipped")
                 await self._inner_dialogue(f"Skipping this step: {step.result_summary}")
-                return
-
-            if action == "complete":
+            elif action == "complete":
+                step.status = "completed"
                 step.result_summary = data.get("result_summary", "Completed")
-                return
+            else:
+                # action == "use_tools": execute tools
+                if self.tool_definitions and self._agent_step_fn:
+                    await self._execute_tools_for_step(step)
 
-            # action == "use_tools": execute tools
-            if self.tool_definitions and self._agent_step_fn:
-                await self._execute_tools_for_step(step)
+                if not step.result_summary:
+                    step.result_summary = data.get("result_summary", "Step completed with tools")
+                step.status = "completed"
 
-            if not step.result_summary:
-                step.result_summary = data.get("result_summary", "Step completed with tools")
+            # Store individual step result in A-MEM
+            if step.result_summary and step.status in ("completed", "skipped"):
+                await self._store_memory(
+                    f"{self._agent_name} completed Workshop step {index + 1}: "
+                    f"{step.description}. Result: {step.result_summary}",
+                    {
+                        "type": "workshop_step",
+                        "phase": "step_result",
+                        "step_index": str(index),
+                        "goal_id": self.session.goal_id,
+                    },
+                )
 
         except Exception:
             logger.exception("Failed to execute workshop step %d", index)
@@ -543,6 +557,18 @@ class WorkshopRunner:
                     "session_id": self.session.id,
                     "content": content,
                 }
+            )
+
+        # Store meaningful dialogue excerpts in A-MEM (capped at 5 per session)
+        if len(content) > 100 and self._dialogue_memory_count < 5:
+            self._dialogue_memory_count += 1
+            await self._store_memory(
+                f"{self._agent_name}'s workshop reflection: {content[:600]}",
+                {
+                    "type": "workshop_dialogue",
+                    "phase": "inner_dialogue",
+                    "goal_id": self.session.goal_id,
+                },
             )
 
     async def _broadcast_plan(self) -> None:
