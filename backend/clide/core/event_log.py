@@ -159,6 +159,41 @@ class EventLog:
             rows = await cursor.fetchall()
         return [_row_to_dict(row) for row in rows]
 
+    async def get_since(
+        self,
+        since: str,
+        limit: int = 200,
+        mode: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Get events created after *since* timestamp, ordered ASC."""
+        await self._ensure_initialized()
+        conditions: list[str] = ["created_at > ?"]
+        params: list[Any] = [since]
+        if mode is not None:
+            conditions.append("mode = ?")
+            params.append(mode)
+        where = f"WHERE {' AND '.join(conditions)}"
+        params.append(limit)
+        async with aiosqlite.connect(self._db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                f"SELECT * FROM agent_events {where} ORDER BY created_at ASC LIMIT ?",  # noqa: S608
+                params,
+            )
+            rows = await cursor.fetchall()
+        return [_row_to_dict(row) for row in rows]
+
+    async def count_since(self, since: str) -> int:
+        """Count events created after *since* timestamp."""
+        await self._ensure_initialized()
+        async with aiosqlite.connect(self._db_path) as db:
+            cursor = await db.execute(
+                "SELECT COUNT(*) FROM agent_events WHERE created_at > ?",
+                (since,),
+            )
+            row = await cursor.fetchone()
+        return row[0] if row else 0
+
 
 def _row_to_dict(row: aiosqlite.Row) -> dict[str, Any]:
     return {

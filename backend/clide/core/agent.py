@@ -496,6 +496,18 @@ class AgentCore:
                                 },
                             )
 
+                        # Store tool result in A-MEM for semantic recall
+                        if result.success and purpose != "workshop_step":
+                            self._track_task(
+                                self._store_tool_memory(
+                                    tool_name=tool_name,
+                                    arguments=arguments,
+                                    result=str(result.result)[:800] if result.success else "",
+                                    mode=mode,
+                                    success=result.success,
+                                )
+                            )
+
                         # Append tool result message for LLM
                         result_content = (
                             json_mod.dumps(result.result)
@@ -862,6 +874,35 @@ class AgentCore:
         # Fire-and-forget: store memory and update character in background
         logger.debug("Storing conversation to memory (background)")
         self._track_task(self._post_response_tasks(content, full_response))
+
+    async def _store_tool_memory(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any],
+        result: str,
+        mode: str,
+        success: bool,
+    ) -> None:
+        """Store a meaningful tool result in A-MEM for semantic recall."""
+        if not self.amem:
+            return
+        if not success:
+            return
+        if len(result.strip()) < 50:
+            return
+        args_summary = str(arguments)[:200]
+        content = (
+            f"{self._agent_name} used {tool_name} during {mode}. "
+            f"Purpose: {args_summary}. "
+            f"Outcome: {result[:800]}"
+        )
+        try:
+            await self.amem.remember(
+                content,
+                metadata={"type": "tool_result", "tool_name": tool_name, "mode": mode},
+            )
+        except Exception:
+            logger.warning("Failed to store tool memory", exc_info=True)
 
     async def _post_response_tasks(self, content: str, full_response: str) -> None:
         """Background tasks after response: store memory and update character."""

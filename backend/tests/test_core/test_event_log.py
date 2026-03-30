@@ -142,3 +142,48 @@ class TestEventLog:
         await log.append("sess1", "chat", "user_message", content="hello")
         events = await log.get_session("unknown_session")
         assert events == []
+
+    async def test_get_since_returns_events_after_timestamp(self, log: EventLog) -> None:
+        """Insert 3 events with staggered timestamps, query since middle one."""
+        await log.append("s1", "chat", "user_message", content="first")
+        first_events = await log.get_session("s1")
+        ts_after_first = first_events[0]["created_at"]
+
+        await log.append("s1", "chat", "user_message", content="second")
+        second_events = await log.get_recent(limit=1)
+        ts_after_second = second_events[0]["created_at"]
+
+        await log.append("s1", "chat", "user_message", content="third")
+
+        results = await log.get_since(since=ts_after_second)
+        assert len(results) == 1
+        assert results[0]["content"] == "third"
+
+    async def test_get_since_with_mode_filter(self, log: EventLog) -> None:
+        """Mix chat + thinking events, filter to chat."""
+        await log.append("s1", "chat", "user_message", content="chat1")
+        await log.append("s1", "thinking", "thought", content="think1")
+        await log.append("s1", "chat", "user_message", content="chat2")
+
+        # Use a timestamp before all events
+        results = await log.get_since(since="2000-01-01T00:00:00", mode="chat")
+        assert len(results) == 2
+        for r in results:
+            assert r["mode"] == "chat"
+
+    async def test_count_since_returns_correct_count(self, log: EventLog) -> None:
+        """Insert events, verify count."""
+        await log.append("s1", "chat", "user_message", content="first")
+        first_events = await log.get_session("s1")
+        ts = first_events[0]["created_at"]
+
+        await log.append("s1", "chat", "user_message", content="second")
+        await log.append("s1", "chat", "user_message", content="third")
+
+        count = await log.count_since(since=ts)
+        assert count == 2
+
+    async def test_count_since_returns_zero_when_empty(self, log: EventLog) -> None:
+        """Empty db returns 0."""
+        count = await log.count_since(since="2000-01-01T00:00:00")
+        assert count == 0

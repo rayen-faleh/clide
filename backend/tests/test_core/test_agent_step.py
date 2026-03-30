@@ -530,6 +530,79 @@ class TestAgentStepWithTools:
         assert checkpoint_events[0].total_phases == 2
 
 
+class TestStoreToolMemory:
+    """Tests for AgentCore._store_tool_memory()."""
+
+    @pytest.mark.asyncio
+    async def test_stores_with_correct_metadata(self) -> None:
+        """Mock amem.remember, call with valid args, verify metadata."""
+        agent = AgentCore()
+        agent.amem = AsyncMock()
+
+        await agent._store_tool_memory(
+            tool_name="web_search",
+            arguments={"query": "weather today"},
+            result="The weather today is sunny with a high of 75F and low winds from the northwest",
+            mode="chat",
+            success=True,
+        )
+
+        agent.amem.remember.assert_called_once()
+        call_args = agent.amem.remember.call_args
+        assert "web_search" in call_args[0][0]
+        meta = call_args[1]["metadata"]
+        assert meta["type"] == "tool_result"
+        assert meta["tool_name"] == "web_search"
+        assert meta["mode"] == "chat"
+
+    @pytest.mark.asyncio
+    async def test_skips_empty_results(self) -> None:
+        """Result < 50 chars -> amem.remember not called."""
+        agent = AgentCore()
+        agent.amem = AsyncMock()
+
+        await agent._store_tool_memory(
+            tool_name="ping",
+            arguments={},
+            result="ok",
+            mode="chat",
+            success=True,
+        )
+
+        agent.amem.remember.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_skips_failures(self) -> None:
+        """success=False -> not called."""
+        agent = AgentCore()
+        agent.amem = AsyncMock()
+
+        await agent._store_tool_memory(
+            tool_name="web_search",
+            arguments={"query": "test"},
+            result="This is a long enough error message that exceeds fifty characters for sure",
+            mode="chat",
+            success=False,
+        )
+
+        agent.amem.remember.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_no_amem_no_error(self) -> None:
+        """self.amem=None -> no error."""
+        agent = AgentCore()
+        agent.amem = None
+
+        # Should not raise
+        await agent._store_tool_memory(
+            tool_name="web_search",
+            arguments={"query": "test"},
+            result="This is a long enough result that exceeds fifty characters easily for testing",
+            mode="chat",
+            success=True,
+        )
+
+
 class TestMakeSessionId:
     def test_returns_uuid_string(self) -> None:
         sid = AgentCore._make_session_id()
