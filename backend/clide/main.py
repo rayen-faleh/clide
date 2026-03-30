@@ -259,10 +259,26 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     agent_core.goal_manager = goal_manager
     set_goal_manager(goal_manager)
 
+    # Activity summarizer
+    from clide.autonomy.activity_summary import ActivitySummarizer
+
+    activity_summarizer = (
+        ActivitySummarizer(
+            event_log=event_log,
+            amem=agent_core.amem,
+            llm_config=agent_core.llm_config,
+            agent_name=agent_core._agent_name,
+        )
+        if event_log and agent_core.amem
+        else None
+    )
+
     # Autonomy scheduler
     scheduler = ThinkingScheduler(
         interval_seconds=settings.agent.states.thinking.interval_seconds,
         agent_state_fn=lambda: agent_core.state_machine.state,
+        activity_summarizer=activity_summarizer,
+        summary_every_n_cycles=5,
     )
 
     # Define the thinking callback

@@ -151,3 +151,55 @@ class TestThinkingScheduler:
         assert scheduler.skipped_count == 0
         scheduler._skipped_count = 5  # noqa: SLF001
         assert scheduler.skipped_count == 5
+
+    async def test_scheduler_calls_activity_summary_every_n_cycles(self) -> None:
+        """maybe_summarize should be called once every summary_every_n_cycles cycles."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        call_order: list[str] = []
+
+        async def cb() -> None:
+            call_order.append("cycle")
+
+        mock_summarizer = MagicMock()
+        mock_summarizer.maybe_summarize = AsyncMock(return_value=True)
+
+        scheduler = ThinkingScheduler(
+            callback=cb,
+            activity_summarizer=mock_summarizer,
+            summary_every_n_cycles=2,
+        )
+
+        # Manually run 4 trigger_now cycles
+        for _ in range(4):
+            await scheduler.trigger_now()
+
+        assert scheduler.cycle_count == 4
+        # Should have been called at cycles 2 and 4
+        assert mock_summarizer.maybe_summarize.call_count == 2
+
+    async def test_scheduler_survives_summary_failure(self) -> None:
+        """Scheduler should continue normally even if maybe_summarize raises."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        cycle_count = 0
+
+        async def cb() -> None:
+            nonlocal cycle_count
+            cycle_count += 1
+
+        mock_summarizer = MagicMock()
+        mock_summarizer.maybe_summarize = AsyncMock(side_effect=RuntimeError("summary failed"))
+
+        scheduler = ThinkingScheduler(
+            callback=cb,
+            activity_summarizer=mock_summarizer,
+            summary_every_n_cycles=1,
+        )
+
+        # Should not raise
+        await scheduler.trigger_now()
+        await scheduler.trigger_now()
+
+        assert scheduler.cycle_count == 2
+        assert cycle_count == 2

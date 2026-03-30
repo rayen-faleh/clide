@@ -23,10 +23,14 @@ class ThinkingScheduler:
         interval_seconds: float = 300,
         callback: Callable[[], Coroutine[Any, Any, None]] | None = None,
         agent_state_fn: Callable[[], Any] | None = None,
+        activity_summarizer: Any = None,
+        summary_every_n_cycles: int = 5,
     ) -> None:
         self.interval_seconds = interval_seconds
         self._callback = callback
         self._agent_state_fn = agent_state_fn
+        self._activity_summarizer = activity_summarizer
+        self._summary_every_n_cycles = summary_every_n_cycles
         self._task: asyncio.Task[None] | None = None
         self._running = False
         self._paused = False
@@ -99,6 +103,15 @@ class ThinkingScheduler:
         try:
             await self._callback()
             self._cycle_count += 1
+            # Periodic activity summary
+            if (
+                self._activity_summarizer is not None
+                and self._cycle_count % self._summary_every_n_cycles == 0
+            ):
+                try:
+                    await self._activity_summarizer.maybe_summarize()
+                except Exception:
+                    logger.warning("Activity summary failed", exc_info=True)
         finally:
             self._thinking_in_progress = False
 
@@ -131,6 +144,15 @@ class ThinkingScheduler:
                             await self._callback()
                             self._cycle_count += 1
                             logger.info("Thinking cycle #%d complete", self._cycle_count)
+                            # Periodic activity summary
+                            if (
+                                self._activity_summarizer is not None
+                                and self._cycle_count % self._summary_every_n_cycles == 0
+                            ):
+                                try:
+                                    await self._activity_summarizer.maybe_summarize()
+                                except Exception:
+                                    logger.warning("Activity summary failed", exc_info=True)
                         finally:
                             self._thinking_in_progress = False
                 await asyncio.sleep(self.interval_seconds)
