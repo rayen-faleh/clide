@@ -250,3 +250,68 @@ class TestGetRandom:
         await amem._ensure_initialized()
         results = await amem.get_random(limit=3)
         assert results == []
+
+
+class TestPrune:
+    @pytest.fixture
+    def small_amem(self, tmp_path: Path) -> AMem:
+        return AMem(
+            db_path=tmp_path / "amem.db",
+            chroma_dir=str(tmp_path / "chromadb"),
+            max_memories=3,
+        )
+
+    @pytest.mark.asyncio
+    async def test_prune_removes_lowest_importance(
+        self, small_amem: AMem
+    ) -> None:
+        await small_amem._ensure_initialized()
+        # Insert 5 zettels with varying importance
+        for i, imp in enumerate([0.1, 0.9, 0.3, 0.8, 0.2]):
+            await _insert_zettel_with_importance(
+                small_amem.db_path, f"mem {i}", imp
+            )
+        deleted = await small_amem.prune()
+        assert deleted == 2  # 5 - 3 = 2 removed
+
+        remaining = await small_amem.list_recent(limit=10)
+        importances = sorted([z.importance for z in remaining])
+        # The two lowest (0.1, 0.2) should be gone
+        assert len(remaining) == 3
+        assert min(importances) >= 0.3
+
+    @pytest.mark.asyncio
+    async def test_prune_noop_under_limit(self, small_amem: AMem) -> None:
+        await small_amem._ensure_initialized()
+        await _insert_zettel_with_type(
+            small_amem.db_path, "only one", "thought"
+        )
+        deleted = await small_amem.prune()
+        assert deleted == 0
+
+    @pytest.mark.asyncio
+    async def test_prune_empty_store(self, small_amem: AMem) -> None:
+        await small_amem._ensure_initialized()
+        deleted = await small_amem.prune()
+        assert deleted == 0
+
+
+async def _insert_zettel_with_importance(
+    db_path: str, content: str, importance: float,
+) -> str:
+    """Insert a zettel with a specific importance score."""
+    zettel_id = str(uuid.uuid4())
+    now = datetime.utcnow()
+    async with aiosqlite.connect(db_path) as db:
+        await db.execute(
+            """INSERT INTO zettels (id, content, summary, keywords, tags,
+               context, importance, access_count, metadata,
+               created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                zettel_id, content, "summary", "[]", "[]", "",
+                importance, 0, "{}", now.isoformat(), now.isoformat(),
+            ),
+        )
+        await db.commit()
+    return zettel_id

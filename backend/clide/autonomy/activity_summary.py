@@ -81,7 +81,15 @@ class ActivitySummarizer:
             },
         )
 
-        # 7. Update last summary timestamp
+        # 7. Prune old events (piggyback on periodic summary)
+        try:
+            pruned = await self._event_log.prune(max_age_days=7)
+            if pruned:
+                logger.info("ActivitySummarizer: pruned %d old events", pruned)
+        except Exception:
+            logger.warning("EventLog prune failed", exc_info=True)
+
+        # 8. Update last summary timestamp
         self._last_summary_at = now.isoformat()
         logger.info("ActivitySummarizer: created summary covering %d events", count)
         return True

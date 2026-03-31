@@ -194,6 +194,21 @@ class EventLog:
             row = await cursor.fetchone()
         return row[0] if row else 0
 
+    async def prune(self, max_age_days: int = 7) -> int:
+        """Delete events older than max_age_days. Returns count deleted."""
+        await self._ensure_initialized()
+        from datetime import timedelta
+
+        cutoff = (datetime.now(UTC) - timedelta(days=max_age_days)).isoformat()
+        async with aiosqlite.connect(self._db_path) as db:
+            cursor = await db.execute(
+                "DELETE FROM agent_events WHERE created_at < ?",
+                (cutoff,),
+            )
+            deleted = cursor.rowcount
+            await db.commit()
+        return deleted
+
 
 def _row_to_dict(row: aiosqlite.Row) -> dict[str, Any]:
     return {

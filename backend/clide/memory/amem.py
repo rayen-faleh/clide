@@ -49,16 +49,20 @@ CREATE TABLE IF NOT EXISTS memory_links (
 class AMem:
     """A-MEM: Agentic Memory with Zettelkasten-style organization."""
 
+    DEFAULT_MAX_MEMORIES = 500
+
     def __init__(
         self,
         db_path: str | Path = "data/amem.db",
         chroma_dir: str = "data/chromadb",
         llm_config: LLMConfig | None = None,
+        max_memories: int = DEFAULT_MAX_MEMORIES,
     ) -> None:
         self.db_path = str(db_path)
         self.chroma = ChromaMemoryStore(persist_directory=chroma_dir)
         self.processor = MemoryProcessor(llm_config=llm_config)
         self._initialized = False
+        self._max_memories = max_memories
 
     async def _ensure_initialized(self) -> None:
         if not self._initialized:
@@ -108,6 +112,10 @@ class AMem:
         )
 
         logger.info("Memory stored: id=%s, keywords=%s", zettel.id, zettel.keywords)
+
+        # Prune if over capacity
+        await self.prune()
+
         return zettel
 
     async def recall(
@@ -226,6 +234,46 @@ class AMem:
             rows = await cursor.fetchall()
 
         return [self._row_to_zettel(row) for row in rows]
+
+    async def prune(self) -> int:
+        """Remove lowest-value memories when over max_memories.
+
+        Eviction score: importance + (access_count * 0.1), lowest first.
+        Returns number of memories deleted.
+        """
+        await self._ensure_initialized()
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute("SELECT COUNT(*) FROM zettels")
+            row = await cursor.fetchone()
+            total = row[0] if row else 0
+
+        if total <= self._max_memories:
+            return 0
+
+        excess = total - self._max_memories
+        # Fetch the lowest-value zettels to evict
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                """SELECT id FROM zettels
+                   ORDER BY (importance + access_count * 0.1) ASC,
+                            created_at ASC
+                   LIMIT ?""",
+                (excess,),
+            )
+            rows = await cursor.fetchall()
+
+        deleted = 0
+        for row in rows:
+            if await self.delete(row["id"]):
+                deleted += 1
+
+        if deleted:
+            logger.info(
+                "Pruned %d memories (was %d, max %d)",
+                deleted, total, self._max_memories,
+            )
+        return deleted
 
     async def _save_zettel(self, zettel: Zettel) -> None:
         """Save a zettel to SQLite."""
