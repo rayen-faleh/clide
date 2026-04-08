@@ -56,6 +56,7 @@ class Goal:
     status: GoalStatus = GoalStatus.ACTIVE
     progress: float = 0.0  # 0.0 to 1.0
     notes: str = ""
+    source: str = ""  # e.g. "workshop" — used to skip spurious progress nudges
     created_at: datetime = field(default_factory=datetime.utcnow)
     updated_at: datetime = field(default_factory=datetime.utcnow)
 

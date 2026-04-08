@@ -21,9 +21,14 @@ CREATE TABLE IF NOT EXISTS goals (
     status TEXT NOT NULL DEFAULT 'active',
     progress REAL NOT NULL DEFAULT 0.0,
     notes TEXT NOT NULL DEFAULT '',
+    source TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 )
+"""
+
+_MIGRATE_ADD_SOURCE_SQL = """
+ALTER TABLE goals ADD COLUMN source TEXT NOT NULL DEFAULT ''
 """
 
 
@@ -39,6 +44,11 @@ class GoalManager:
             Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
             async with aiosqlite.connect(self.db_path) as db:
                 await db.execute(CREATE_GOALS_SQL)
+                # Migrate: add source column to existing databases that lack it
+                cursor = await db.execute("PRAGMA table_info(goals)")
+                columns = {row[1] for row in await cursor.fetchall()}
+                if "source" not in columns:
+                    await db.execute(_MIGRATE_ADD_SOURCE_SQL)
                 await db.commit()
             self._initialized = True
 
@@ -46,6 +56,7 @@ class GoalManager:
         self,
         description: str,
         priority: GoalPriority = GoalPriority.MEDIUM,
+        source: str = "",
     ) -> Goal:
         """Create a new goal."""
         await self._ensure_initialized()
@@ -54,6 +65,7 @@ class GoalManager:
             id=str(uuid.uuid4()),
             description=description,
             priority=priority,
+            source=source,
             created_at=now,
             updated_at=now,
         )
@@ -61,8 +73,8 @@ class GoalManager:
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute(
                 """INSERT INTO goals (id, description, priority, status, progress,
-                   notes, created_at, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                   notes, source, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     goal.id,
                     goal.description,
@@ -70,6 +82,7 @@ class GoalManager:
                     goal.status.value,
                     goal.progress,
                     goal.notes,
+                    goal.source,
                     goal.created_at.isoformat(),
                     goal.updated_at.isoformat(),
                 ),
@@ -236,6 +249,7 @@ class GoalManager:
             status=GoalStatus(row["status"]),
             progress=row["progress"],
             notes=row["notes"],
+            source=row["source"] if "source" in row.keys() else "",
             created_at=datetime.fromisoformat(row["created_at"]),
             updated_at=datetime.fromisoformat(row["updated_at"]),
         )

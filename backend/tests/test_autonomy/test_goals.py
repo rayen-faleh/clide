@@ -121,6 +121,64 @@ class TestGoalManager:
         assert found is None
 
 
+class TestGoalSource:
+    """Tests for the goal source field."""
+
+    async def test_create_goal_default_source(self, goal_manager: GoalManager) -> None:
+        goal = await goal_manager.create("Some goal")
+        assert goal.source == ""
+
+    async def test_create_goal_with_source(self, goal_manager: GoalManager) -> None:
+        goal = await goal_manager.create("Workshop goal", source="workshop")
+        assert goal.source == "workshop"
+
+    async def test_source_persisted_and_retrieved(self, goal_manager: GoalManager) -> None:
+        created = await goal_manager.create("Persisted goal", source="workshop")
+        fetched = await goal_manager.get(created.id)
+        assert fetched is not None
+        assert fetched.source == "workshop"
+
+    async def test_source_visible_in_get_active(self, goal_manager: GoalManager) -> None:
+        await goal_manager.create("Regular goal")
+        await goal_manager.create("Workshop goal", source="workshop")
+        active = await goal_manager.get_active()
+        sources = {g.source for g in active}
+        assert sources == {"", "workshop"}
+
+    async def test_migration_adds_source_to_existing_db(self, tmp_path: Path) -> None:
+        """Verify that an existing DB without the source column gets migrated."""
+        db_path = tmp_path / "legacy.db"
+        # Create a DB with old schema (no source column)
+        async with aiosqlite.connect(db_path) as db:
+            await db.execute("""
+                CREATE TABLE goals (
+                    id TEXT PRIMARY KEY,
+                    description TEXT NOT NULL,
+                    priority TEXT NOT NULL DEFAULT 'medium',
+                    status TEXT NOT NULL DEFAULT 'active',
+                    progress REAL NOT NULL DEFAULT 0.0,
+                    notes TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+            """)
+            await db.execute(
+                "INSERT INTO goals VALUES (?,?,?,?,?,?,?,?)",
+                ("old-id", "Old goal", "medium", "active", 0.0, "", "2024-01-01", "2024-01-01"),
+            )
+            await db.commit()
+
+        # Opening through GoalManager should migrate
+        manager = GoalManager(db_path=db_path)
+        goal = await manager.get("old-id")
+        assert goal is not None
+        assert goal.source == ""  # Default applied by migration
+
+        # New goals should work normally
+        new_goal = await manager.create("New goal", source="workshop")
+        assert new_goal.source == "workshop"
+
+
 class TestGoalExpiry:
     """Tests for goal auto-expiry."""
 
