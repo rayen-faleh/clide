@@ -99,6 +99,12 @@ class ThinkingScheduler:
             logger.info("Skipping manual trigger - thinking cycle already in progress")
             self._skipped_count += 1
             return
+        if self._agent_state_fn:
+            current_state = self._agent_state_fn()
+            if str(current_state) == "workshop":
+                logger.info("Skipping manual trigger - agent in workshop mode")
+                self._skipped_count += 1
+                return
         self._thinking_in_progress = True
         try:
             await self._callback()

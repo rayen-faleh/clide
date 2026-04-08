@@ -96,6 +96,58 @@ class TestSchedulerWorkshopSkip:
 
         assert call_count >= 1
 
+    async def test_trigger_now_skips_when_in_workshop(self) -> None:
+        call_count = 0
+
+        async def cb() -> None:
+            nonlocal call_count
+            call_count += 1
+
+        scheduler = ThinkingScheduler(
+            interval_seconds=60,
+            callback=cb,
+            agent_state_fn=lambda: AgentState.WORKSHOP,
+        )
+
+        await scheduler.trigger_now()
+
+        assert call_count == 0
+        assert scheduler.skipped_count == 1
+
+    async def test_trigger_now_runs_when_not_in_workshop(self) -> None:
+        call_count = 0
+
+        async def cb() -> None:
+            nonlocal call_count
+            call_count += 1
+
+        scheduler = ThinkingScheduler(
+            interval_seconds=60,
+            callback=cb,
+            agent_state_fn=lambda: AgentState.IDLE,
+        )
+
+        await scheduler.trigger_now()
+
+        assert call_count == 1
+        assert scheduler.skipped_count == 0
+
+    async def test_trigger_now_runs_without_state_fn(self) -> None:
+        call_count = 0
+
+        async def cb() -> None:
+            nonlocal call_count
+            call_count += 1
+
+        scheduler = ThinkingScheduler(
+            interval_seconds=60,
+            callback=cb,
+        )
+
+        await scheduler.trigger_now()
+
+        assert call_count == 1
+
     def test_init_with_state_fn(self) -> None:
         def state_fn() -> AgentState:
             return AgentState.IDLE
