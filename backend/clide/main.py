@@ -378,7 +378,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
                         if existing:
                             goal = existing
                         else:
-                            goal = await goal_manager.create(new_goal)
+                            goal = await goal_manager.create(new_goal, source="workshop")
 
                     if goal:
                         from clide.api.schemas import WorkshopStartedPayload

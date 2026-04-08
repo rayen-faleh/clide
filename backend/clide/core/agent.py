@@ -619,7 +619,7 @@ class AgentCore:
                 goal_id = "user-workshop"
                 if self.goal_manager:
                     try:
-                        goal = await self.goal_manager.create(goal_desc)
+                        goal = await self.goal_manager.create(goal_desc, source="workshop")
                         goal_id = goal.id
                     except Exception:
                         logger.warning("Failed to create goal for workshop", exc_info=True)
@@ -928,6 +928,10 @@ class AgentCore:
             try:
                 active_goals = await self.goal_manager.get_active()
                 for goal in active_goals:
+                    # Skip workshop-owned goals — their progress is managed by the
+                    # WorkshopRunner and should not be nudged by unrelated chat messages.
+                    if goal.source == "workshop":
+                        continue
                     # Simple heuristic: if goal description words appear in the
                     # conversation, nudge progress slightly
                     goal_words = set(goal.description.lower().split())
@@ -1434,6 +1438,7 @@ class AgentCore:
             tool_skills=self._load_tool_skills(),
             agent_step_fn=self.agent_step,
             context_builder=self.context_builder,
+            goal_manager=self.goal_manager,
         )
 
         self._track_task(self._run_workshop())
