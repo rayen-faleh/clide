@@ -13,7 +13,7 @@ from typing import Any
 
 import litellm
 
-from clide.autonomy.models import WorkshopPlan, WorkshopSession, WorkshopStep
+from clide.autonomy.models import GoalStatus, WorkshopPlan, WorkshopSession, WorkshopStep
 from clide.core.agent_events import (
     TextChunkEvent,
     ToolCallEvent,
@@ -155,6 +155,7 @@ class WorkshopRunner:
         tool_skills: dict[str, str] | None = None,
         agent_step_fn: Any = None,
         context_builder: Any = None,
+        goal_manager: Any = None,
     ) -> None:
         self.llm_config = llm_config
         self._agent_step_fn = agent_step_fn
@@ -172,6 +173,7 @@ class WorkshopRunner:
         self._broadcast_fn = broadcast_fn
         self._tool_execute_fn = tool_execute_fn
         self._context_builder = context_builder
+        self._goal_manager = goal_manager
         self._cancelled = False
         self._paused = False
         self._dialogue_memory_count: int = 0
@@ -185,6 +187,7 @@ class WorkshopRunner:
             if not plan or self._cancelled:
                 self.session.status = "abandoned"
                 await self._broadcast_ended("abandoned", "Failed to generate plan")
+                await self._abandon_goal()
                 return
 
             self.session.plan = plan
@@ -228,6 +231,9 @@ class WorkshopRunner:
                 self.session.status = "completed"
                 await self._broadcast_ended("completed", "Workshop completed successfully")
 
+                # Mark the backing goal as completed
+                await self._complete_goal()
+
                 # Store completion summary in memory
                 step_results = "; ".join(
                     f"{s.description}: {s.result_summary or s.status}"
@@ -242,11 +248,13 @@ class WorkshopRunner:
             else:
                 self.session.status = "abandoned"
                 await self._broadcast_ended("abandoned", "Workshop was cancelled")
+                await self._abandon_goal()
 
         except Exception:
             logger.exception("Workshop session failed")
             self.session.status = "abandoned"
             await self._broadcast_ended("abandoned", "Workshop failed due to an error")
+            await self._abandon_goal()
 
     async def _generate_plan(self) -> WorkshopPlan | None:
         """Generate a structured plan from the goal."""
@@ -621,6 +629,33 @@ class WorkshopRunner:
             }
         )
 
+    async def _complete_goal(self) -> None:
+        """Mark the backing goal as completed in the goal manager."""
+        if not self._goal_manager:
+            return
+        try:
+            await self._goal_manager.update(
+                self.session.goal_id,
+                status=GoalStatus.COMPLETED,
+                progress=1.0,
+            )
+            logger.info("Workshop goal %s marked as completed", self.session.goal_id)
+        except Exception:
+            logger.warning("Failed to mark workshop goal as completed", exc_info=True)
+
+    async def _abandon_goal(self) -> None:
+        """Mark the backing goal as abandoned in the goal manager."""
+        if not self._goal_manager:
+            return
+        try:
+            await self._goal_manager.update(
+                self.session.goal_id,
+                status=GoalStatus.ABANDONED,
+            )
+            logger.info("Workshop goal %s marked as abandoned", self.session.goal_id)
+        except Exception:
+            logger.warning("Failed to mark workshop goal as abandoned", exc_info=True)
+
     async def _store_memory(self, content: str, metadata: dict[str, str]) -> None:
         """Store a workshop event in A-MEM for long-term recall."""
         if not self._amem:
@@ -631,7 +666,11 @@ class WorkshopRunner:
             logger.warning("Failed to store workshop memory", exc_info=True)
 
     async def _recall_context(self, query: str, memory_limit: int = 5) -> str:
-        """Recall memories + cross-mode events relevant to a query."""
+        """Recall memories + cross-mode events relevant to a query.
+
+        Explicitly excludes thinking-mode events to prevent the workshop LLM
+        from being distracted by goal-oriented thoughts about other goals.
+        """
         if not self._context_builder:
             return ""
         result = await self._context_builder.build(
@@ -639,6 +678,7 @@ class WorkshopRunner:
             current_mode="workshop",
             memory_limit=memory_limit,
             event_limit=5,
+            include_modes=["chat"],
         )
         parts: list[str] = []
         if result.memory_text:

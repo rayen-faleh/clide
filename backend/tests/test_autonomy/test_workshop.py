@@ -788,6 +788,211 @@ class TestWorkshopPrompts:
         assert "tool1, tool2" in result
 
 
+class TestWorkshopGoalLifecycle:
+    """Tests that workshop marks the backing goal complete/abandoned when it ends."""
+
+    @pytest.mark.asyncio
+    async def test_run_marks_goal_completed_on_success(self) -> None:
+        plan_json = (
+            '{"objective": "test", "approach": "do it", '
+            '"steps": [{"description": "step 1", "tools_needed": [], '
+            '"success_criteria": "done"}]}'
+        )
+        step_json = (
+            '{"inner_dialogue": "Working", "action": "complete", '
+            '"result_summary": "Completed step 1"}'
+        )
+        review_json = '{"review": "Everything went well."}'
+
+        call_count = 0
+
+        async def mock_acompletion(**kwargs: Any) -> MagicMock:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return _make_llm_response(plan_json)
+            elif call_count == 2:
+                return _make_llm_response(step_json)
+            else:
+                return _make_llm_response(review_json)
+
+        mock_goal_manager = MagicMock()
+        mock_goal_manager.update = AsyncMock()
+
+        runner = WorkshopRunner(
+            llm_config=LLMConfig(),
+            goal_id="goal-123",
+            goal_description="Test goal",
+            goal_manager=mock_goal_manager,
+        )
+
+        with patch("clide.autonomy.workshop.litellm") as mock_litellm:
+            mock_litellm.acompletion = mock_acompletion
+            await runner.run()
+
+        assert runner.session.status == "completed"
+        mock_goal_manager.update.assert_awaited_once()
+        call_kwargs = mock_goal_manager.update.call_args
+        assert call_kwargs[0][0] == "goal-123"
+        from clide.autonomy.models import GoalStatus
+        assert call_kwargs[1]["status"] == GoalStatus.COMPLETED
+        assert call_kwargs[1]["progress"] == 1.0
+
+    @pytest.mark.asyncio
+    async def test_run_marks_goal_abandoned_on_cancel(self) -> None:
+        plan_json = (
+            '{"objective": "test", "approach": "do it", '
+            '"steps": [{"description": "step 1"}, {"description": "step 2"}]}'
+        )
+        step_json = '{"inner_dialogue": "Working", "action": "complete", "result_summary": "Done"}'
+
+        call_count = 0
+        mock_goal_manager = MagicMock()
+        mock_goal_manager.update = AsyncMock()
+
+        runner = WorkshopRunner(
+            llm_config=LLMConfig(),
+            goal_id="goal-456",
+            goal_description="Cancelled goal",
+            goal_manager=mock_goal_manager,
+        )
+
+        async def mock_acompletion(**kwargs: Any) -> MagicMock:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return _make_llm_response(plan_json)
+            else:
+                runner.cancel()
+                return _make_llm_response(step_json)
+
+        with patch("clide.autonomy.workshop.litellm") as mock_litellm:
+            mock_litellm.acompletion = mock_acompletion
+            await runner.run()
+
+        assert runner.session.status == "abandoned"
+        mock_goal_manager.update.assert_awaited_once()
+        call_kwargs = mock_goal_manager.update.call_args
+        assert call_kwargs[0][0] == "goal-456"
+        from clide.autonomy.models import GoalStatus
+        assert call_kwargs[1]["status"] == GoalStatus.ABANDONED
+
+    @pytest.mark.asyncio
+    async def test_run_marks_goal_abandoned_on_plan_failure(self) -> None:
+        mock_goal_manager = MagicMock()
+        mock_goal_manager.update = AsyncMock()
+
+        runner = WorkshopRunner(
+            llm_config=LLMConfig(),
+            goal_id="goal-789",
+            goal_description="Failed goal",
+            goal_manager=mock_goal_manager,
+        )
+
+        with patch("clide.autonomy.workshop.litellm") as mock_litellm:
+            mock_litellm.acompletion = AsyncMock(side_effect=Exception("LLM error"))
+            await runner.run()
+
+        assert runner.session.status == "abandoned"
+        mock_goal_manager.update.assert_awaited_once()
+        call_kwargs = mock_goal_manager.update.call_args
+        from clide.autonomy.models import GoalStatus
+        assert call_kwargs[1]["status"] == GoalStatus.ABANDONED
+
+    @pytest.mark.asyncio
+    async def test_run_no_goal_manager_still_completes(self) -> None:
+        """WorkshopRunner without goal_manager should work without errors."""
+        plan_json = (
+            '{"objective": "test", "approach": "do it", '
+            '"steps": [{"description": "step 1"}]}'
+        )
+        step_json = (
+            '{"inner_dialogue": "Working", "action": "complete", '
+            '"result_summary": "Done"}'
+        )
+        review_json = '{"review": "Good."}'
+
+        call_count = 0
+
+        async def mock_acompletion(**kwargs: Any) -> MagicMock:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return _make_llm_response(plan_json)
+            elif call_count == 2:
+                return _make_llm_response(step_json)
+            else:
+                return _make_llm_response(review_json)
+
+        runner = WorkshopRunner(
+            llm_config=LLMConfig(),
+            goal_id="g1",
+            goal_description="Test",
+        )
+        assert runner._goal_manager is None
+
+        with patch("clide.autonomy.workshop.litellm") as mock_litellm:
+            mock_litellm.acompletion = mock_acompletion
+            await runner.run()
+
+        assert runner.session.status == "completed"
+
+
+class TestWorkshopContextFiltering:
+    """Tests that workshop context excludes thinking-mode events."""
+
+    @pytest.mark.asyncio
+    async def test_recall_context_excludes_thinking_mode(self) -> None:
+        """_recall_context should pass include_modes=["chat"] to exclude thinking events."""
+        from clide.core.context_builder import ContextResult
+
+        mock_builder = MagicMock()
+        mock_builder.build = AsyncMock(
+            return_value=ContextResult(
+                memory_text="",
+                cross_mode_text="",
+                memories_used=0,
+            )
+        )
+
+        runner = WorkshopRunner(
+            llm_config=LLMConfig(),
+            goal_id="g1",
+            goal_description="Test goal",
+            context_builder=mock_builder,
+        )
+
+        await runner._recall_context("some query")
+
+        mock_builder.build.assert_awaited_once()
+        call_kwargs = mock_builder.build.call_args[1]
+        assert call_kwargs.get("include_modes") == ["chat"]
+
+    @pytest.mark.asyncio
+    async def test_recall_context_chat_events_still_included(self) -> None:
+        """Chat-mode events should still appear in workshop context."""
+        from clide.core.context_builder import ContextResult
+
+        mock_builder = MagicMock()
+        mock_builder.build = AsyncMock(
+            return_value=ContextResult(
+                memory_text="",
+                cross_mode_text="- [chat] User: asked about Python",
+                memories_used=0,
+            )
+        )
+
+        runner = WorkshopRunner(
+            llm_config=LLMConfig(),
+            goal_id="g1",
+            goal_description="Test goal",
+            context_builder=mock_builder,
+        )
+
+        result = await runner._recall_context("some query")
+        assert "asked about Python" in result
+
+
 class TestWorkshopMemoryRecall:
     """Tests for workshop memory recall via ContextBuilder."""
 
@@ -823,6 +1028,7 @@ class TestWorkshopMemoryRecall:
             current_mode="workshop",
             memory_limit=5,
             event_limit=5,
+            include_modes=["chat"],
         )
 
     @pytest.mark.asyncio
