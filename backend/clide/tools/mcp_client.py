@@ -142,7 +142,15 @@ class MCPClient:
                 timeout=120.0,
             )
 
-            if result and "content" in result:
+            if result is None:
+                # _send_request returns None on timeout
+                return ToolResult(
+                    call_id=call_id,
+                    error="Tool call timed out (no response from MCP server after 120s)",
+                    success=False,
+                )
+
+            if "content" in result:
                 # Extract text content from MCP response
                 content_parts = result["content"]
                 text_parts = [
@@ -150,10 +158,18 @@ class MCPClient:
                     for p in content_parts
                     if isinstance(p, dict) and p.get("type") == "text"
                 ]
+                is_error = result.get("isError", False)
+                text = "\n".join(text_parts) if text_parts else str(result)
+                if is_error:
+                    return ToolResult(
+                        call_id=call_id,
+                        error=text or "MCP server reported an error",
+                        success=False,
+                    )
                 return ToolResult(
                     call_id=call_id,
-                    result="\n".join(text_parts) if text_parts else result,
-                    success=not result.get("isError", False),
+                    result=text,
+                    success=True,
                 )
 
             return ToolResult(call_id=call_id, result=result, success=True)

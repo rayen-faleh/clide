@@ -76,6 +76,49 @@ class TestMCPClientCallTool:
         assert result.success is False
         assert "not available" in (result.error or "")
 
+    async def test_call_tool_timeout_returns_failure(self, enabled_config: MCPServerConfig) -> None:
+        """Fix 1: timeout (None from _send_request) must return success=False, not success=True."""
+        client = MCPClient(enabled_config)
+        client._status = ToolStatus.AVAILABLE
+
+        with patch.object(client, "_send_request", new_callable=AsyncMock, return_value=None):
+            result = await client.call_tool("slow_tool", {})
+
+        assert result.success is False
+        assert result.error is not None
+        assert "timed out" in result.error.lower()
+
+    async def test_call_tool_is_error_populates_error_field(self, enabled_config: MCPServerConfig) -> None:
+        """Fix 4: isError=true must set success=False AND populate error with the content text."""
+        client = MCPClient(enabled_config)
+        client._status = ToolStatus.AVAILABLE
+
+        mcp_response = {
+            "content": [{"type": "text", "text": "File not found: /tmp/missing.txt"}],
+            "isError": True,
+        }
+        with patch.object(client, "_send_request", new_callable=AsyncMock, return_value=mcp_response):
+            result = await client.call_tool("read_file", {"path": "/tmp/missing.txt"})
+
+        assert result.success is False
+        assert result.error == "File not found: /tmp/missing.txt"
+
+    async def test_call_tool_success_extracts_text_content(self, enabled_config: MCPServerConfig) -> None:
+        """Normal success path still works after refactor."""
+        client = MCPClient(enabled_config)
+        client._status = ToolStatus.AVAILABLE
+
+        mcp_response = {
+            "content": [{"type": "text", "text": "search result here"}],
+            "isError": False,
+        }
+        with patch.object(client, "_send_request", new_callable=AsyncMock, return_value=mcp_response):
+            result = await client.call_tool("search", {"q": "test"})
+
+        assert result.success is True
+        assert result.result == "search result here"
+        assert result.error is None
+
 
 class TestMCPClientDisconnect:
     async def test_disconnect_cleans_up(self, enabled_config: MCPServerConfig) -> None:

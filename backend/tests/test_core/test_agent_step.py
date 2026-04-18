@@ -31,7 +31,10 @@ async def collect_events(agent_step_iter: Any) -> list[Any]:
 
 
 # Helper to make a mock LLM response with tool calls
-def make_tool_response(tool_calls: list[tuple[str, dict[str, Any], str]]) -> MagicMock:
+def make_tool_response(
+    tool_calls: list[tuple[str, dict[str, Any], str]],
+    finish_reason: str = "tool_calls",
+) -> MagicMock:
     """Make a mock litellm response with tool_calls."""
     mock_tool_calls = []
     for name, args, cid in tool_calls:
@@ -42,7 +45,7 @@ def make_tool_response(tool_calls: list[tuple[str, dict[str, Any], str]]) -> Mag
         mock_tool_calls.append(tc)
 
     choice = MagicMock()
-    choice.finish_reason = "tool_calls"
+    choice.finish_reason = finish_reason
     choice.message.tool_calls = mock_tool_calls
     choice.message.content = None
     choice.message.model_dump.return_value = {
@@ -601,6 +604,170 @@ class TestStoreToolMemory:
             mode="chat",
             success=True,
         )
+
+
+class TestToolCallRobustness:
+    """Tests for the tool calling reliability fixes."""
+
+    @pytest.mark.asyncio
+    async def test_tool_calls_accepted_when_finish_reason_is_stop(self) -> None:
+        """Fix 2: tool_calls populated with finish_reason='stop' must still be executed."""
+        agent = AgentCore()
+        agent.state_machine.transition(AgentState.CONVERSING)
+
+        registry = MagicMock()
+        registry.execute_tool = AsyncMock(
+            return_value=ToolResult(call_id="c1", result="result", success=True)
+        )
+        agent.tool_registry = registry
+
+        # Some models (OpenRouter, Ollama) return finish_reason="stop" with tool_calls
+        tool_resp = make_tool_response([("search", {"q": "test"}, "c1")], finish_reason="stop")
+        text_resp = make_text_response("Here are the results.")
+
+        with patch(
+            "clide.core.agent.complete_with_tools",
+            new_callable=AsyncMock,
+            side_effect=[tool_resp, text_resp],
+        ):
+            events = await collect_events(
+                agent.agent_step(
+                    messages=[{"role": "user", "content": "search"}],
+                    tools=[{"type": "function", "function": {"name": "search"}}],
+                    session_id="s1",
+                    mode="chat",
+                )
+            )
+
+        tool_call_events = [e for e in events if isinstance(e, ToolCallEvent)]
+        assert len(tool_call_events) == 1
+        assert tool_call_events[0].tool_name == "search"
+        assert registry.execute_tool.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_non_json_serializable_result_falls_back_to_str(self) -> None:
+        """Fix 3: tool result that can't be json.dumps'd falls back to str(), doesn't crash."""
+        agent = AgentCore()
+        agent.state_machine.transition(AgentState.CONVERSING)
+
+        # Return an object that is not JSON-serializable
+        class _Unserializable:
+            def __repr__(self) -> str:
+                return "UnserializableObj(x=42)"
+
+        registry = MagicMock()
+        registry.execute_tool = AsyncMock(
+            return_value=ToolResult(
+                call_id="c1",
+                result=_Unserializable(),
+                success=True,
+            )
+        )
+        agent.tool_registry = registry
+
+        tool_resp = make_tool_response([("tool", {}, "c1")])
+        text_resp = make_text_response("Got it.")
+
+        with patch(
+            "clide.core.agent.complete_with_tools",
+            new_callable=AsyncMock,
+            side_effect=[tool_resp, text_resp],
+        ):
+            events = await collect_events(
+                agent.agent_step(
+                    messages=[{"role": "user", "content": "run tool"}],
+                    tools=[{"type": "function", "function": {"name": "tool"}}],
+                    session_id="s1",
+                    mode="chat",
+                )
+            )
+
+        # Should complete without raising — the str() fallback is used
+        text_events = [e for e in events if isinstance(e, TextChunkEvent) and e.done]
+        assert len(text_events) == 1
+        assert text_events[0].content == "Got it."
+
+    @pytest.mark.asyncio
+    async def test_large_tool_result_is_truncated(self) -> None:
+        """Fix 5: tool result exceeding 8000 chars is truncated before being fed to LLM."""
+        agent = AgentCore()
+        agent.state_machine.transition(AgentState.CONVERSING)
+
+        large_result = "x" * 20_000
+
+        registry = MagicMock()
+        registry.execute_tool = AsyncMock(
+            return_value=ToolResult(call_id="c1", result=large_result, success=True)
+        )
+        agent.tool_registry = registry
+
+        captured_messages: list[Any] = []
+        call_count = 0
+
+        async def side_effect(messages: Any, *args: Any, **kwargs: Any) -> MagicMock:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return make_tool_response([("big_tool", {}, "c1")])
+            # Second call: capture messages so we can inspect tool result content
+            captured_messages.extend(messages)
+            return make_text_response("Done.")
+
+        with patch("clide.core.agent.complete_with_tools", side_effect=side_effect):
+            await collect_events(
+                agent.agent_step(
+                    messages=[{"role": "user", "content": "get big data"}],
+                    tools=[{"type": "function", "function": {"name": "big_tool"}}],
+                    session_id="s1",
+                    mode="chat",
+                )
+            )
+
+        # Find the tool result message in what was sent to the LLM
+        tool_messages = [m for m in captured_messages if m.get("role") == "tool"]
+        assert len(tool_messages) == 1
+        content = tool_messages[0]["content"]
+        assert len(content) <= 8000 + 60  # 8000 chars + truncation notice overhead
+        assert "[truncated" in content
+
+    @pytest.mark.asyncio
+    async def test_tool_result_within_limit_not_truncated(self) -> None:
+        """Tool results under 8000 chars pass through unchanged."""
+        agent = AgentCore()
+        agent.state_machine.transition(AgentState.CONVERSING)
+
+        normal_result = "result data " * 100  # ~1200 chars
+
+        registry = MagicMock()
+        registry.execute_tool = AsyncMock(
+            return_value=ToolResult(call_id="c1", result=normal_result, success=True)
+        )
+        agent.tool_registry = registry
+
+        captured_messages: list[Any] = []
+        call_count = 0
+
+        async def side_effect(messages: Any, *args: Any, **kwargs: Any) -> MagicMock:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return make_tool_response([("tool", {}, "c1")])
+            captured_messages.extend(messages)
+            return make_text_response("Done.")
+
+        with patch("clide.core.agent.complete_with_tools", side_effect=side_effect):
+            await collect_events(
+                agent.agent_step(
+                    messages=[{"role": "user", "content": "get data"}],
+                    tools=[{"type": "function", "function": {"name": "tool"}}],
+                    session_id="s1",
+                    mode="chat",
+                )
+            )
+
+        tool_messages = [m for m in captured_messages if m.get("role") == "tool"]
+        assert len(tool_messages) == 1
+        assert "[truncated" not in tool_messages[0]["content"]
 
 
 class TestMakeSessionId:
