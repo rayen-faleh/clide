@@ -158,7 +158,9 @@ These are your private thoughts. No one else can see them. Think freely.
 
 {reward_context}
 
-{memory_context}"""
+{memory_context}
+
+{thought_history}"""
 
 MIND_WANDERING_PROMPT = (
     _PRIVATE_PREAMBLE
@@ -334,6 +336,12 @@ class Thinker:
                     f"Recent memories:\n{memory_context}"
                     if memory_context
                     else "No recent memories yet."
+                ),
+                thought_history=(
+                    f"Recent thoughts (don't repeat — build on them or explore something new):\n"
+                    f"{thought_history}"
+                    if thought_history
+                    else ""
                 ),
             )
 

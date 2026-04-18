@@ -433,3 +433,90 @@ class TestThinker:
             thought, _, _ = await thinker.think(thought_type="observation")
 
         assert thought.thought_type == "observation"
+
+
+class TestNonGoalThoughtHistory:
+    """Tests that non-goal thought types receive thought_history for loop prevention."""
+
+    async def test_mind_wandering_includes_thought_history(self, thinker: Thinker) -> None:
+        """thought_history appears in mind_wandering prompt."""
+        mock_response = '{"thought": "Random musing.", "mood": "playful", "mood_intensity": 0.4}'
+        captured_messages: list[object] = []
+
+        async def fake_stream(
+            messages: object, *args: object, **kwargs: object
+        ) -> AsyncIterator[str]:
+            captured_messages.append(messages)
+            yield mock_response
+
+        with patch("clide.autonomy.thinker.stream_completion", side_effect=fake_stream):
+            await thinker.think(
+                thought_type="mind_wandering",
+                thought_history="- [Recent thought] I was pondering fractals [5m ago]",
+            )
+
+        prompt = captured_messages[0][0]["content"]  # type: ignore[index]
+        assert "fractals" in prompt
+        assert "don't repeat" in prompt.lower()
+
+    async def test_self_reflection_includes_thought_history(self, thinker: Thinker) -> None:
+        """thought_history appears in self_reflection prompt."""
+        mock_response = (
+            '{"thought": "Looking inward.", "mood": "contemplative", "mood_intensity": 0.6}'
+        )
+        captured_messages: list[object] = []
+
+        async def fake_stream(
+            messages: object, *args: object, **kwargs: object
+        ) -> AsyncIterator[str]:
+            captured_messages.append(messages)
+            yield mock_response
+
+        with patch("clide.autonomy.thinker.stream_completion", side_effect=fake_stream):
+            await thinker.think(
+                thought_type="self_reflection",
+                thought_history="- [Recent thought] I reflected on patience [2m ago]",
+            )
+
+        prompt = captured_messages[0][0]["content"]  # type: ignore[index]
+        assert "patience" in prompt
+
+    async def test_observation_includes_thought_history(self, thinker: Thinker) -> None:
+        """thought_history appears in observation prompt."""
+        mock_response = (
+            '{"thought": "Noticed something.", "mood": "curious", "mood_intensity": 0.5}'
+        )
+        captured_messages: list[object] = []
+
+        async def fake_stream(
+            messages: object, *args: object, **kwargs: object
+        ) -> AsyncIterator[str]:
+            captured_messages.append(messages)
+            yield mock_response
+
+        with patch("clide.autonomy.thinker.stream_completion", side_effect=fake_stream):
+            await thinker.think(
+                thought_type="observation",
+                thought_history="- [Recent thought] I noticed birds migrating [1m ago]",
+            )
+
+        prompt = captured_messages[0][0]["content"]  # type: ignore[index]
+        assert "birds" in prompt
+
+    async def test_empty_thought_history_not_injected(self, thinker: Thinker) -> None:
+        """Empty thought_history leaves no placeholder text in non-goal prompts."""
+        mock_response = '{"thought": "Fresh start.", "mood": "neutral", "mood_intensity": 0.3}'
+        captured_messages: list[object] = []
+
+        async def fake_stream(
+            messages: object, *args: object, **kwargs: object
+        ) -> AsyncIterator[str]:
+            captured_messages.append(messages)
+            yield mock_response
+
+        with patch("clide.autonomy.thinker.stream_completion", side_effect=fake_stream):
+            await thinker.think(thought_type="mind_wandering", thought_history="")
+
+        prompt = captured_messages[0][0]["content"]  # type: ignore[index]
+        assert "don't repeat" not in prompt.lower()
+        assert "Recent thoughts" not in prompt
