@@ -296,6 +296,85 @@ class TestPrune:
         assert deleted == 0
 
 
+class TestRecallFiltering:
+    """Tests for exclude_types and exclude_ids parameters in AMem.recall()."""
+
+    @pytest.mark.asyncio
+    @patch("clide.memory.processor.stream_completion")
+    async def test_exclude_types_filters_out_matching(
+        self, mock_stream: AsyncMock, amem: AMem
+    ) -> None:
+        """recall(exclude_types=["thought"]) should not return thought-type memories."""
+        mock_stream.side_effect = lambda msgs, cfg, **kw: _mock_extraction_stream(msgs, cfg, **kw)
+
+        await amem.remember("Autonomous thought about X", metadata={"type": "thought"})
+        z_workshop = await amem.remember("Workshop step result Y", metadata={"type": "workshop_step"})
+
+        results = await amem.recall("X Y", limit=5, exclude_types=["thought"])
+        result_ids = [z.id for z in results]
+
+        assert z_workshop.id in result_ids
+        assert all(z.metadata.get("type") != "thought" for z in results)
+
+    @pytest.mark.asyncio
+    @patch("clide.memory.processor.stream_completion")
+    async def test_exclude_ids_filters_out_specific_memories(
+        self, mock_stream: AsyncMock, amem: AMem
+    ) -> None:
+        """recall(exclude_ids={id}) should not return that memory."""
+        mock_stream.side_effect = lambda msgs, cfg, **kw: _mock_extraction_stream(msgs, cfg, **kw)
+
+        z1 = await amem.remember("Python programming tips", metadata={"type": "chat"})
+        z2 = await amem.remember("Python data science notes", metadata={"type": "chat"})
+
+        results = await amem.recall("Python", limit=5, exclude_ids={z1.id})
+        result_ids = [z.id for z in results]
+
+        assert z1.id not in result_ids
+        assert z2.id in result_ids
+
+    @pytest.mark.asyncio
+    @patch("clide.memory.processor.stream_completion")
+    async def test_exclude_types_and_ids_combined(
+        self, mock_stream: AsyncMock, amem: AMem
+    ) -> None:
+        """Both filters apply simultaneously."""
+        mock_stream.side_effect = lambda msgs, cfg, **kw: _mock_extraction_stream(msgs, cfg, **kw)
+
+        z_thought = await amem.remember("Thought about coding", metadata={"type": "thought"})
+        z_chat = await amem.remember("Chat about coding", metadata={"type": "chat"})
+        z_workshop = await amem.remember("Workshop coding step", metadata={"type": "workshop_step"})
+
+        results = await amem.recall(
+            "coding",
+            limit=5,
+            exclude_types=["thought"],
+            exclude_ids={z_chat.id},
+        )
+        result_ids = [z.id for z in results]
+
+        assert z_thought.id not in result_ids
+        assert z_chat.id not in result_ids
+        assert z_workshop.id in result_ids
+
+    @pytest.mark.asyncio
+    @patch("clide.memory.processor.stream_completion")
+    async def test_no_filters_returns_all_types(
+        self, mock_stream: AsyncMock, amem: AMem
+    ) -> None:
+        """Without filters, all types are returned (regression guard)."""
+        mock_stream.side_effect = lambda msgs, cfg, **kw: _mock_extraction_stream(msgs, cfg, **kw)
+
+        z1 = await amem.remember("Thought memory", metadata={"type": "thought"})
+        z2 = await amem.remember("Workshop memory", metadata={"type": "workshop"})
+
+        results = await amem.recall("memory", limit=5)
+        result_ids = [z.id for z in results]
+
+        assert z1.id in result_ids
+        assert z2.id in result_ids
+
+
 async def _insert_zettel_with_importance(
     db_path: str, content: str, importance: float,
 ) -> str:

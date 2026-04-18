@@ -123,42 +123,71 @@ class AMem:
         query: str,
         limit: int = 5,
         use_spreading: bool = True,
+        exclude_types: list[str] | None = None,
+        exclude_ids: set[str] | None = None,
     ) -> list[Zettel]:
         """Recall memories relevant to a query.
 
         Uses semantic search via ChromaDB, then optionally follows links
         (activation spreading) to find related memories.
+
+        Args:
+            exclude_types: Skip zettels whose ``metadata["type"]`` is in this list.
+                Useful for keeping thinking-mode thoughts out of workshop context.
+            exclude_ids: Skip zettels whose ``id`` is in this set.
+                Useful for preventing the current session's own writes from
+                being recalled and creating duplicate / self-poisoning context.
         """
         await self._ensure_initialized()
         logger.debug("Recalling memories for: %s...", query[:80])
 
+        _excluded_types = set(exclude_types) if exclude_types else set()
+        _excluded_ids = exclude_ids or set()
+
+        # Fetch more from ChromaDB to compensate for items we may filter out
+        fetch_limit = limit + len(_excluded_ids) if _excluded_ids else limit
+
         # Semantic search via ChromaDB
-        search_results = await self.chroma.search(query, limit=limit)
+        search_results = await self.chroma.search(query, limit=fetch_limit)
         logger.debug("Found %d memories via semantic search", len(search_results))
 
-        # Load full zettels from SQLite
+        # Load full zettels from SQLite, applying exclusion filters
         zettels: list[Zettel] = []
         seen_ids: set[str] = set()
 
         for result in search_results:
+            if result["id"] in _excluded_ids:
+                continue
             zettel = await self.get(result["id"])
             if zettel:
+                if zettel.metadata.get("type") in _excluded_types:
+                    continue
                 zettel.access_count += 1
                 await self._update_access_count(zettel.id, zettel.access_count)
                 zettels.append(zettel)
                 seen_ids.add(zettel.id)
+                if len(zettels) >= limit:
+                    break
 
         # Activation spreading: follow links to find related memories
         if use_spreading and zettels:
             spread_ids: set[str] = set()
             for z in zettels:
                 for link in z.links:
-                    if link.target_id not in seen_ids and link.strength > 0.5:
+                    if (
+                        link.target_id not in seen_ids
+                        and link.target_id not in _excluded_ids
+                        and link.strength > 0.5
+                    ):
                         spread_ids.add(link.target_id)
 
             for spread_id in list(spread_ids)[:limit]:
                 zettel = await self.get(spread_id)
-                if zettel and zettel.id not in seen_ids:
+                if (
+                    zettel
+                    and zettel.id not in seen_ids
+                    and zettel.metadata.get("type") not in _excluded_types
+                ):
                     zettels.append(zettel)
                     seen_ids.add(zettel.id)
 
