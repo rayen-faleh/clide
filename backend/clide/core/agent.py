@@ -370,8 +370,14 @@ class AgentCore:
                     purpose=purpose,
                 )
 
-                # Check if LLM wants to call tools
-                if choice.finish_reason == "tool_calls" and choice.message.tool_calls:
+                # Check if LLM wants to call tools.
+                # Some models (OpenRouter, Ollama) return finish_reason="stop" while
+                # still populating tool_calls. Accept tool calls regardless of
+                # finish_reason as long as tool_calls is non-empty.
+                has_tool_calls = bool(
+                    getattr(choice.message, "tool_calls", None)
+                )
+                if has_tool_calls:
                     logger.info(
                         "LLM requested %d tool call(s)",
                         len(choice.message.tool_calls),
@@ -508,12 +514,22 @@ class AgentCore:
                                 )
                             )
 
-                        # Append tool result message for LLM
-                        result_content = (
-                            json_mod.dumps(result.result)
-                            if result.success
-                            else f"Error: {result.error}"
-                        )
+                        # Append tool result message for LLM.
+                        # Use safe serialization (json, then str fallback) and
+                        # truncate to avoid overflowing the model's context window.
+                        _TOOL_RESULT_LIMIT = 8000
+                        if result.success:
+                            try:
+                                result_content = json_mod.dumps(result.result)
+                            except (TypeError, ValueError):
+                                result_content = str(result.result)
+                        else:
+                            result_content = f"Error: {result.error}"
+                        if len(result_content) > _TOOL_RESULT_LIMIT:
+                            result_content = (
+                                result_content[:_TOOL_RESULT_LIMIT]
+                                + f"\n[truncated — {len(result_content)} chars total]"
+                            )
                         messages.append(
                             {
                                 "role": "tool",
@@ -1137,11 +1153,19 @@ class AgentCore:
 
             if self.context_builder:
                 try:
+                    # Exclude types already injected through dedicated channels to
+                    # prevent the same memory from appearing twice in the prompt:
+                    # - "thought": thought_history already pulls the last 3 thoughts
+                    # - "conversation": recent_conversation_context covers fresh convos
+                    _recall_exclude = ["thought"]
+                    if recent_conversation_context:
+                        _recall_exclude.append("conversation")
                     ctx = await self.context_builder.build(
                         query=topic_query,
                         current_mode="thinking",
                         memory_limit=10,
                         event_limit=5,
+                        exclude_types=_recall_exclude,
                     )
                     memory_context = ctx.memory_text
                 except Exception:
@@ -1164,10 +1188,61 @@ class AgentCore:
             if self.character:
                 personality_context = self.character.build_personality_prompt()
 
+            # --- Thought history: for ALL thought types ---
+            # Gives every cycle visibility into prior thoughts, preventing loops.
+            thought_history = ""
+            if self.amem:
+                with contextlib.suppress(Exception):
+                    recent_thoughts = await self.amem.get_recent_by_type("thought", limit=3)
+                    recent_ids = [z.id for z in recent_thoughts]
+                    random_memories = await self.amem.get_random(
+                        limit=2, exclude_ids=recent_ids
+                    )
+                    thought_parts: list[str] = []
+                    for z in recent_thoughts:
+                        thought_parts.append(
+                            f"- [Recent thought] {z.content[:200]}"
+                            f" [{self._format_age(z.created_at)}]"
+                        )
+                    for z in random_memories:
+                        thought_parts.append(
+                            f"- [Past memory] {z.summary or z.content[:100]}"
+                            f" [{self._format_age(z.created_at)}]"
+                        )
+                    thought_history = "\n".join(thought_parts)
+
+            # --- Diversity nudge: for ALL thought types ---
+            # Fires when the topic tracker shows repetition across any thought types.
+            if len(self._recent_topics) >= 3:
+                from collections import Counter
+
+                topic_counts = Counter(self._recent_topics[-6:])
+                most_common_topic, count = topic_counts.most_common(1)[0]
+
+                if count >= 3:
+                    diversity_instruction = (
+                        f"IMPORTANT: You have been thinking about '{most_common_topic}' "
+                        f"for {count} cycles in a row. You MUST think about something "
+                        f"completely different this time. Pick a new topic unrelated to "
+                        f"'{most_common_topic}'. Explore a different interest, goal, "
+                        f"or curiosity."
+                    )
+                    logger.info(
+                        "Diversity enforced: topic '%s' repeated %d times",
+                        most_common_topic,
+                        count,
+                    )
+                    thought_history = f"{diversity_instruction}\n\n{thought_history}"
+                elif count >= 2:
+                    diversity_instruction = (
+                        f"Note: You've been thinking about '{most_common_topic}' recently. "
+                        f"Consider exploring a different topic this time for variety."
+                    )
+                    thought_history = f"{diversity_instruction}\n\n{thought_history}"
+
             # --- Heavy context: only for goal-oriented thoughts ---
             goals_context = ""
             opinions_context = ""
-            thought_history = ""
             tools_context = ""
             tool_results_context = ""
             current_goal_count = 0
@@ -1207,27 +1282,6 @@ class AgentCore:
                                     reverse=True,
                                 )[:5]
                             )
-
-                # --- Gather thought history ---
-                if self.amem:
-                    with contextlib.suppress(Exception):
-                        recent_thoughts = await self.amem.get_recent_by_type("thought", limit=3)
-                        recent_ids = [z.id for z in recent_thoughts]
-                        random_memories = await self.amem.get_random(
-                            limit=2, exclude_ids=recent_ids
-                        )
-                        thought_parts: list[str] = []
-                        for z in recent_thoughts:
-                            thought_parts.append(
-                                f"- [Recent thought] {z.content[:200]}"
-                                f" [{self._format_age(z.created_at)}]"
-                            )
-                        for z in random_memories:
-                            thought_parts.append(
-                                f"- [Past memory] {z.summary or z.content[:100]}"
-                                f" [{self._format_age(z.created_at)}]"
-                            )
-                        thought_history = "\n".join(thought_parts)
 
                 # --- Gather tools context ---
                 if self.tool_registry:
@@ -1289,36 +1343,6 @@ class AgentCore:
                             logger.debug("Thinking phase 1: no tools used")
                     except Exception:
                         logger.warning("Thinking phase 1 tool exploration failed", exc_info=True)
-
-                # --- Build diversity instruction ---
-                diversity_instruction = ""
-                if len(self._recent_topics) >= 3:
-                    from collections import Counter
-
-                    topic_counts = Counter(self._recent_topics[-6:])
-                    most_common_topic, count = topic_counts.most_common(1)[0]
-
-                    if count >= 3:
-                        diversity_instruction = (
-                            f"IMPORTANT: You have been thinking about '{most_common_topic}' "
-                            f"for {count} cycles in a row. You MUST think about something "
-                            f"completely different this time. Pick a new topic unrelated to "
-                            f"'{most_common_topic}'. Explore a different interest, goal, "
-                            f"or curiosity."
-                        )
-                        logger.info(
-                            "Diversity enforced: topic '%s' repeated %d times",
-                            most_common_topic,
-                            count,
-                        )
-                    elif count >= 2:
-                        diversity_instruction = (
-                            f"Note: You've been thinking about '{most_common_topic}' recently. "
-                            f"Consider exploring a different topic this time for variety."
-                        )
-
-                if diversity_instruction:
-                    thought_history = f"{diversity_instruction}\n\n{thought_history}"
 
             # --- Generate thought ---
             max_goals = 5

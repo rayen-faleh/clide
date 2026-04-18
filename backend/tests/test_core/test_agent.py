@@ -831,10 +831,11 @@ class TestVariableThoughtTypes:
 
             await agent.autonomous_think()
 
-        # Non-goal types should have empty heavy context
+        # Non-goal types should have empty heavy context (goals/opinions/tools)
         assert captured_kwargs.get("goals_context", "") == ""
         assert captured_kwargs.get("opinions_context", "") == ""
         assert captured_kwargs.get("tools_context", "") == ""
+        # thought_history is now gathered for ALL types (no amem here, so still empty)
         assert captured_kwargs.get("thought_history", "") == ""
 
     @pytest.mark.asyncio
@@ -863,6 +864,220 @@ class TestVariableThoughtTypes:
         thought_content, mood, intensity, thought_type = result
         assert thought_content == "observation thought"
         assert thought_type == "observation"
+
+
+class TestThinkingThoughtHistoryUniversal:
+    """Tests that thought_history is gathered for ALL thought types, not just goal-oriented."""
+
+    @pytest.mark.asyncio
+    async def test_non_goal_receives_thought_history_when_amem_present(self) -> None:
+        """mind_wandering should receive thought_history when amem has prior thoughts."""
+        from datetime import UTC, datetime
+
+        from clide.memory.models import Zettel
+
+        amem = MagicMock()
+        amem.remember = AsyncMock()
+        amem.get_recent_by_type = AsyncMock(return_value=[])
+        amem.get_random = AsyncMock(return_value=[])
+
+        # Provide a prior thought via get_recent_by_type
+        prior_zettel = MagicMock(spec=Zettel)
+        prior_zettel.id = "z-prior"
+        prior_zettel.content = "I was thinking about fractals"
+        prior_zettel.summary = "fractals thought"
+        prior_zettel.created_at = datetime.now(UTC)
+        amem.get_recent_by_type = AsyncMock(return_value=[prior_zettel])
+        amem.get_random = AsyncMock(return_value=[])
+
+        agent = AgentCore(amem=amem)
+
+        mock_thought = MagicMock()
+        mock_thought.content = "wandering"
+        mock_thought.metadata = {}
+        mock_thought.thought_type = "mind_wandering"
+
+        captured_kwargs: dict[str, object] = {}
+
+        async def capturing_think(**kwargs: object) -> tuple[MagicMock, str, float]:
+            captured_kwargs.update(kwargs)
+            return mock_thought, "playful", 0.4
+
+        with (
+            patch("clide.autonomy.thinker.Thinker") as mock_thinker_cls,
+            patch("clide.core.agent.random") as mock_random,
+        ):
+            mock_random.choices.return_value = ["mind_wandering"]
+            thinker_instance = MagicMock()
+            thinker_instance.think = capturing_think
+            mock_thinker_cls.return_value = thinker_instance
+
+            await agent.autonomous_think()
+
+        assert "fractals" in str(captured_kwargs.get("thought_history", ""))
+
+    @pytest.mark.asyncio
+    async def test_non_goal_thought_history_empty_without_amem(self) -> None:
+        """Without amem, thought_history stays empty for non-goal types (no crash)."""
+        agent = AgentCore()  # no amem
+
+        mock_thought = MagicMock()
+        mock_thought.content = "observation"
+        mock_thought.metadata = {}
+        mock_thought.thought_type = "observation"
+
+        captured_kwargs: dict[str, object] = {}
+
+        async def capturing_think(**kwargs: object) -> tuple[MagicMock, str, float]:
+            captured_kwargs.update(kwargs)
+            return mock_thought, "neutral", 0.3
+
+        with (
+            patch("clide.autonomy.thinker.Thinker") as mock_thinker_cls,
+            patch("clide.core.agent.random") as mock_random,
+        ):
+            mock_random.choices.return_value = ["observation"]
+            thinker_instance = MagicMock()
+            thinker_instance.think = capturing_think
+            mock_thinker_cls.return_value = thinker_instance
+
+            await agent.autonomous_think()
+
+        assert captured_kwargs.get("thought_history", "") == ""
+
+
+class TestThinkingContextDeduplication:
+    """Tests that semantic recall excludes types already injected explicitly."""
+
+    @pytest.mark.asyncio
+    async def test_context_builder_excludes_thought_type(self) -> None:
+        """context_builder.build() is called with exclude_types containing 'thought'."""
+        from clide.core.context_builder import ContextResult
+
+        mock_builder = MagicMock()
+        mock_builder.build = AsyncMock(
+            return_value=ContextResult(memory_text="", cross_mode_text="", memories_used=0)
+        )
+
+        amem = MagicMock()
+        amem.remember = AsyncMock()
+        amem.get_recent_by_type = AsyncMock(return_value=[])
+        amem.get_random = AsyncMock(return_value=[])
+
+        agent = AgentCore(amem=amem)
+        agent.context_builder = mock_builder
+
+        mock_thought = MagicMock()
+        mock_thought.content = "test"
+        mock_thought.metadata = {}
+        mock_thought.thought_type = "mind_wandering"
+
+        with (
+            patch("clide.autonomy.thinker.Thinker") as mock_thinker_cls,
+            patch("clide.core.agent.random") as mock_random,
+        ):
+            mock_random.choices.return_value = ["mind_wandering"]
+            thinker_instance = MagicMock()
+            thinker_instance.think = AsyncMock(return_value=(mock_thought, "neutral", 0.4))
+            mock_thinker_cls.return_value = thinker_instance
+
+            await agent.autonomous_think()
+
+        mock_builder.build.assert_awaited_once()
+        call_kwargs = mock_builder.build.call_args[1]
+        assert "thought" in call_kwargs.get("exclude_types", [])
+
+    @pytest.mark.asyncio
+    async def test_context_builder_also_excludes_conversation_when_fresh_convos(self) -> None:
+        """When recent_conversation_context is populated, 'conversation' is also excluded."""
+        from datetime import UTC, datetime
+
+        from clide.core.context_builder import ContextResult
+        from clide.memory.models import Zettel
+
+        mock_builder = MagicMock()
+        mock_builder.build = AsyncMock(
+            return_value=ContextResult(memory_text="", cross_mode_text="", memories_used=0)
+        )
+
+        # Fresh conversation (< 10 minutes ago)
+        fresh_convo = MagicMock(spec=Zettel)
+        fresh_convo.id = "c1"
+        fresh_convo.content = "User asked about Python"
+        fresh_convo.summary = "Python discussion"
+        fresh_convo.created_at = datetime.now(UTC)
+
+        amem = MagicMock()
+        amem.remember = AsyncMock()
+        amem.get_recent_by_type = AsyncMock(side_effect=lambda t, limit=3: (
+            [fresh_convo] if t == "conversation" else []
+        ))
+        amem.get_random = AsyncMock(return_value=[])
+
+        agent = AgentCore(amem=amem)
+        agent.context_builder = mock_builder
+
+        mock_thought = MagicMock()
+        mock_thought.content = "test"
+        mock_thought.metadata = {}
+        mock_thought.thought_type = "mind_wandering"
+
+        with (
+            patch("clide.autonomy.thinker.Thinker") as mock_thinker_cls,
+            patch("clide.core.agent.random") as mock_random,
+        ):
+            mock_random.choices.return_value = ["mind_wandering"]
+            thinker_instance = MagicMock()
+            thinker_instance.think = AsyncMock(return_value=(mock_thought, "neutral", 0.4))
+            mock_thinker_cls.return_value = thinker_instance
+
+            await agent.autonomous_think()
+
+        call_kwargs = mock_builder.build.call_args[1]
+        exclude = call_kwargs.get("exclude_types", [])
+        assert "thought" in exclude
+        assert "conversation" in exclude
+
+    @pytest.mark.asyncio
+    async def test_context_builder_does_not_exclude_conversation_when_no_fresh_convos(
+        self,
+    ) -> None:
+        """'conversation' is NOT excluded when there are no fresh conversations."""
+        from clide.core.context_builder import ContextResult
+
+        mock_builder = MagicMock()
+        mock_builder.build = AsyncMock(
+            return_value=ContextResult(memory_text="", cross_mode_text="", memories_used=0)
+        )
+
+        amem = MagicMock()
+        amem.remember = AsyncMock()
+        amem.get_recent_by_type = AsyncMock(return_value=[])  # no conversations
+        amem.get_random = AsyncMock(return_value=[])
+
+        agent = AgentCore(amem=amem)
+        agent.context_builder = mock_builder
+
+        mock_thought = MagicMock()
+        mock_thought.content = "test"
+        mock_thought.metadata = {}
+        mock_thought.thought_type = "mind_wandering"
+
+        with (
+            patch("clide.autonomy.thinker.Thinker") as mock_thinker_cls,
+            patch("clide.core.agent.random") as mock_random,
+        ):
+            mock_random.choices.return_value = ["mind_wandering"]
+            thinker_instance = MagicMock()
+            thinker_instance.think = AsyncMock(return_value=(mock_thought, "neutral", 0.4))
+            mock_thinker_cls.return_value = thinker_instance
+
+            await agent.autonomous_think()
+
+        call_kwargs = mock_builder.build.call_args[1]
+        exclude = call_kwargs.get("exclude_types", [])
+        assert "thought" in exclude
+        assert "conversation" not in exclude
 
 
 class TestConversationStorePersistence:
