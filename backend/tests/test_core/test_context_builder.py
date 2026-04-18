@@ -125,7 +125,7 @@ class TestBuildWithMemoriesOnly:
         assert "user prefers Y" in result.memory_text
         assert "workshop result Z" in result.memory_text
         assert result.cross_mode_text == ""
-        amem.recall.assert_awaited_once_with("test", limit=5)
+        amem.recall.assert_awaited_once_with("test", limit=5, exclude_types=None, exclude_ids=None)
 
 
 class TestBuildWithEventsOnly:
@@ -312,3 +312,62 @@ class TestMemoryUsesContentFallback:
         result = await builder.build(query="test", current_mode="chat")
 
         assert "full content here" in result.memory_text
+
+
+class TestBuildExcludeFilters:
+    @pytest.mark.asyncio
+    async def test_exclude_types_passed_to_amem(self) -> None:
+        """exclude_types is forwarded to amem.recall()."""
+        amem = _make_amem([])
+        event_log = _make_event_log()
+        builder = ContextBuilder(event_log=event_log, amem=amem)
+
+        await builder.build(
+            query="test",
+            current_mode="workshop",
+            exclude_types=["thought"],
+        )
+
+        amem.recall.assert_awaited_once_with(
+            "test",
+            limit=5,
+            exclude_types=["thought"],
+            exclude_ids=None,
+        )
+
+    @pytest.mark.asyncio
+    async def test_exclude_ids_passed_to_amem(self) -> None:
+        """exclude_ids is forwarded to amem.recall()."""
+        amem = _make_amem([])
+        event_log = _make_event_log()
+        builder = ContextBuilder(event_log=event_log, amem=amem)
+        excluded = {"id-1", "id-2"}
+
+        await builder.build(
+            query="test",
+            current_mode="workshop",
+            exclude_ids=excluded,
+        )
+
+        amem.recall.assert_awaited_once_with(
+            "test",
+            limit=5,
+            exclude_types=None,
+            exclude_ids=excluded,
+        )
+
+    @pytest.mark.asyncio
+    async def test_exclude_filters_default_to_none(self) -> None:
+        """When not provided, both exclude params are None."""
+        amem = _make_amem([])
+        event_log = _make_event_log()
+        builder = ContextBuilder(event_log=event_log, amem=amem)
+
+        await builder.build(query="test", current_mode="chat")
+
+        amem.recall.assert_awaited_once_with(
+            "test",
+            limit=5,
+            exclude_types=None,
+            exclude_ids=None,
+        )

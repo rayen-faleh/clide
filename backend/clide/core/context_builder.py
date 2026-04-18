@@ -93,6 +93,8 @@ class ContextBuilder:
         memory_limit: int = 5,
         event_limit: int = 8,
         include_modes: list[str] | None = None,
+        exclude_types: list[str] | None = None,
+        exclude_ids: set[str] | None = None,
     ) -> ContextResult:
         """Build cross-mode context for an LLM call.
 
@@ -103,6 +105,9 @@ class ContextBuilder:
             event_limit: Max cross-mode events to include from EventLog.
             include_modes: Explicit list of modes to pull events from.
                 If None, defaults to all modes except current_mode.
+            exclude_types: Memory types to exclude from recall (e.g. ``["thought"]``).
+            exclude_ids: Specific memory IDs to exclude from recall (e.g. current
+                session's own writes to avoid self-poisoning).
 
         Returns:
             ContextResult with formatted memory and cross-mode text.
@@ -114,7 +119,12 @@ class ContextBuilder:
         # 1. Memory recall via A-MEM
         if self._amem:
             try:
-                zettels = await self._amem.recall(query, limit=memory_limit)
+                zettels = await self._amem.recall(
+                    query,
+                    limit=memory_limit,
+                    exclude_types=exclude_types,
+                    exclude_ids=exclude_ids,
+                )
                 if zettels:
                     memories_used = len(zettels)
                     memory_text = "\n".join(
