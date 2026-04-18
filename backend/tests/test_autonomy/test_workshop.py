@@ -967,6 +967,8 @@ class TestWorkshopContextFiltering:
         mock_builder.build.assert_awaited_once()
         call_kwargs = mock_builder.build.call_args[1]
         assert call_kwargs.get("include_modes") == ["chat"]
+        assert call_kwargs.get("exclude_types") == ["thought"]
+        assert "exclude_ids" in call_kwargs
 
     @pytest.mark.asyncio
     async def test_recall_context_chat_events_still_included(self) -> None:
@@ -1029,6 +1031,8 @@ class TestWorkshopMemoryRecall:
             memory_limit=5,
             event_limit=5,
             include_modes=["chat"],
+            exclude_types=["thought"],
+            exclude_ids=set(),
         )
 
     @pytest.mark.asyncio
@@ -1083,6 +1087,53 @@ class TestWorkshopMemoryRecall:
         assert "Previously researched topic Z" in system_content
 
     @pytest.mark.asyncio
+    async def test_recall_context_passes_session_memory_ids(self) -> None:
+        """_recall_context passes current-session memory IDs as exclude_ids."""
+        from clide.core.context_builder import ContextResult
+
+        mock_builder = MagicMock()
+        mock_builder.build = AsyncMock(
+            return_value=ContextResult(memory_text="", cross_mode_text="", memories_used=0)
+        )
+
+        runner = WorkshopRunner(
+            llm_config=LLMConfig(),
+            goal_id="g1",
+            goal_description="Test goal",
+            context_builder=mock_builder,
+        )
+        runner._session_memory_ids = {"mem-abc", "mem-def"}
+
+        await runner._recall_context("query")
+
+        call_kwargs = mock_builder.build.call_args[1]
+        assert call_kwargs.get("exclude_ids") == {"mem-abc", "mem-def"}
+        assert call_kwargs.get("exclude_types") == ["thought"]
+
+    @pytest.mark.asyncio
+    async def test_store_memory_tracks_session_id(self) -> None:
+        """_store_memory adds the written zettel's ID to _session_memory_ids."""
+        from clide.memory.models import Zettel
+        from datetime import UTC, datetime
+
+        runner = WorkshopRunner(
+            llm_config=LLMConfig(),
+            goal_id="g1",
+            goal_description="Test",
+        )
+
+        fake_zettel = MagicMock(spec=Zettel)
+        fake_zettel.id = "zettel-xyz"
+
+        mock_amem = MagicMock()
+        mock_amem.remember = AsyncMock(return_value=fake_zettel)
+        runner._amem = mock_amem
+
+        await runner._store_memory("some content", {"type": "workshop"})
+
+        assert "zettel-xyz" in runner._session_memory_ids
+
+    @pytest.mark.asyncio
     async def test_workshop_no_context_builder_still_works(self) -> None:
         """Backward compat: None builder = same old behavior."""
         plan_json = (
@@ -1120,3 +1171,174 @@ class TestWorkshopMemoryRecall:
             await runner.run()
 
         assert runner.session.status == "completed"
+
+
+class TestWorkshopSessionMessages:
+    """Tests for cumulative session messages across workshop phases."""
+
+    @pytest.mark.asyncio
+    async def test_session_messages_initialized_on_run(self) -> None:
+        """run() initializes _session_messages with the system message."""
+        plan_json = (
+            '{"objective": "test", "approach": "do it", '
+            '"steps": [{"description": "step 1"}]}'
+        )
+        step_json = '{"inner_dialogue": "ok", "action": "complete", "result_summary": "Done"}'
+        review_json = '{"review": "Good."}'
+
+        call_count = 0
+
+        async def mock_acompletion(**kwargs: Any) -> MagicMock:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return _make_llm_response(plan_json)
+            elif call_count == 2:
+                return _make_llm_response(step_json)
+            else:
+                return _make_llm_response(review_json)
+
+        runner = WorkshopRunner(
+            llm_config=LLMConfig(),
+            goal_id="g1",
+            goal_description="Test goal",
+            personality_context="You are Clide.",
+        )
+
+        with patch("clide.autonomy.workshop.litellm") as mock_litellm:
+            mock_litellm.acompletion = mock_acompletion
+            await runner.run()
+
+        assert runner._session_messages[0]["role"] == "system"
+        assert "You are Clide." in runner._session_messages[0]["content"]
+
+    @pytest.mark.asyncio
+    async def test_session_messages_grow_across_phases(self) -> None:
+        """Each phase (plan, step) appends user+assistant turns to _session_messages."""
+        plan_json = (
+            '{"objective": "test", "approach": "do it", '
+            '"steps": [{"description": "step 1"}]}'
+        )
+        step_json = '{"inner_dialogue": "ok", "action": "complete", "result_summary": "Done"}'
+        review_json = '{"review": "Good."}'
+
+        call_count = 0
+
+        async def mock_acompletion(**kwargs: Any) -> MagicMock:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return _make_llm_response(plan_json)
+            elif call_count == 2:
+                return _make_llm_response(step_json)
+            else:
+                return _make_llm_response(review_json)
+
+        runner = WorkshopRunner(
+            llm_config=LLMConfig(),
+            goal_id="g1",
+            goal_description="Test goal",
+        )
+
+        with patch("clide.autonomy.workshop.litellm") as mock_litellm:
+            mock_litellm.acompletion = mock_acompletion
+            await runner.run()
+
+        # Expected: [system, user(plan), assistant(plan), user(step), assistant(step)]
+        assert len(runner._session_messages) >= 5
+        roles = [m["role"] for m in runner._session_messages]
+        assert roles[0] == "system"
+        assert roles[1] == "user"
+        assert roles[2] == "assistant"
+        assert roles[3] == "user"
+        assert roles[4] == "assistant"
+
+    @pytest.mark.asyncio
+    async def test_step_messages_include_prior_conversation(self) -> None:
+        """Messages sent for step decision include the plan turn."""
+        plan_json = (
+            '{"objective": "test obj", "approach": "do it", '
+            '"steps": [{"description": "step 1"}]}'
+        )
+        step_json = '{"inner_dialogue": "ok", "action": "complete", "result_summary": "Done"}'
+        review_json = '{"review": "Good."}'
+
+        call_count = 0
+        captured_step_messages: list[Any] = []
+
+        async def mock_acompletion(**kwargs: Any) -> MagicMock:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return _make_llm_response(plan_json)
+            elif call_count == 2:
+                captured_step_messages.extend(kwargs.get("messages", []))
+                return _make_llm_response(step_json)
+            else:
+                return _make_llm_response(review_json)
+
+        runner = WorkshopRunner(
+            llm_config=LLMConfig(),
+            goal_id="g1",
+            goal_description="Test goal",
+        )
+
+        with patch("clide.autonomy.workshop.litellm") as mock_litellm:
+            mock_litellm.acompletion = mock_acompletion
+            await runner.run()
+
+        # The step call received messages with the plan conversation already in context
+        assert len(captured_step_messages) > 2
+        roles = [m["role"] for m in captured_step_messages]
+        assert roles.count("user") >= 2
+        assert roles.count("assistant") >= 1
+
+    def test_build_messages_uses_session_messages_when_set(self) -> None:
+        """_build_messages returns cumulative history + new user turn."""
+        runner = WorkshopRunner(
+            llm_config=LLMConfig(),
+            goal_id="g1",
+            goal_description="Test",
+        )
+        runner._session_messages = [
+            {"role": "system", "content": "system content"},
+            {"role": "user", "content": "prior user turn"},
+            {"role": "assistant", "content": "prior assistant turn"},
+        ]
+
+        messages = runner._build_messages("new prompt")
+
+        assert len(messages) == 4
+        assert messages[-1] == {"role": "user", "content": "new prompt"}
+        # Original session_messages not mutated
+        assert len(runner._session_messages) == 3
+
+    def test_build_messages_fallback_when_no_session(self) -> None:
+        """_build_messages falls back to a fresh list when run() not called."""
+        runner = WorkshopRunner(
+            llm_config=LLMConfig(),
+            goal_id="g1",
+            goal_description="Test",
+            personality_context="persona here",
+        )
+        messages = runner._build_messages("the prompt")
+
+        assert len(messages) == 2
+        assert messages[0]["role"] == "system"
+        assert "persona here" in messages[0]["content"]
+        assert messages[1] == {"role": "user", "content": "the prompt"}
+
+    def test_build_messages_extra_context_injected_into_system(self) -> None:
+        """extra_context is appended to the system message but not persisted."""
+        runner = WorkshopRunner(
+            llm_config=LLMConfig(),
+            goal_id="g1",
+            goal_description="Test",
+        )
+        runner._session_messages = [{"role": "system", "content": "base system"}]
+
+        messages = runner._build_messages("prompt", extra_context="## Memory\nsome context")
+
+        assert "## Memory\nsome context" in messages[0]["content"]
+        # Original session_messages system NOT mutated
+        assert runner._session_messages[0]["content"] == "base system"

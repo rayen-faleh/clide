@@ -177,10 +177,16 @@ class WorkshopRunner:
         self._cancelled = False
         self._paused = False
         self._dialogue_memory_count: int = 0
+        # Track memory IDs written during this session to prevent self-poisoning
+        self._session_memory_ids: set[str] = set()
+        # Cumulative conversation history shared across plan/step/review phases
+        self._session_messages: list[dict[str, Any]] = []
 
     async def run(self) -> None:
         """Main workshop loop: plan -> execute steps -> review."""
         self._dialogue_memory_count = 0
+        self._session_memory_ids = set()
+        self._session_messages = [self._build_system_message()]
         try:
             # Phase 1: Generate plan
             plan = await self._generate_plan()
@@ -266,11 +272,12 @@ class WorkshopRunner:
             self.session.goal_description, memory_limit=5
         )
 
+        messages = self._build_messages(prompt, extra_context=context_section)
         try:
             if self._agent_step_fn:
                 text = ""
                 async for event in self._agent_step_fn(
-                    messages=self._build_messages(prompt, extra_context=context_section),
+                    messages=messages,
                     tools=[],
                     session_id=str(uuid.uuid4()),
                     mode="workshop",
@@ -282,7 +289,7 @@ class WorkshopRunner:
                 model_name = _build_model_name(self.llm_config)
                 kwargs: dict[str, Any] = {
                     "model": model_name,
-                    "messages": self._build_messages(prompt, extra_context=context_section),
+                    "messages": messages,
                     "max_tokens": self.llm_config.max_tokens,
                     "stream": False,
                 }
@@ -297,6 +304,10 @@ class WorkshopRunner:
             if not text:
                 logger.warning("Empty plan response from LLM")
                 return None
+
+            # Grow cumulative session context: plan prompt + response
+            self._session_messages.append({"role": "user", "content": prompt})
+            self._session_messages.append({"role": "assistant", "content": text})
 
             logger.debug("Plan response (%d chars): %s", len(text), text[:300])
 
@@ -360,11 +371,12 @@ class WorkshopRunner:
         )
         context_section = await self._recall_context(step.description, memory_limit=3)
 
+        messages = self._build_messages(prompt, extra_context=context_section)
         try:
             if self._agent_step_fn:
                 text = ""
                 async for event in self._agent_step_fn(
-                    messages=self._build_messages(prompt, extra_context=context_section),
+                    messages=messages,
                     tools=[],
                     session_id=str(uuid.uuid4()),
                     mode="workshop",
@@ -376,7 +388,7 @@ class WorkshopRunner:
                 model_name = _build_model_name(self.llm_config)
                 step_kwargs: dict[str, Any] = {
                     "model": model_name,
-                    "messages": self._build_messages(prompt, extra_context=context_section),
+                    "messages": messages,
                     "max_tokens": self.llm_config.max_tokens,
                     "stream": False,
                 }
@@ -384,6 +396,10 @@ class WorkshopRunner:
                     step_kwargs["api_base"] = self.llm_config.api_base
                 response = await litellm.acompletion(**step_kwargs)
                 text = str(response.choices[0].message.content or "")
+
+            # Grow cumulative session context: step decision prompt + response
+            self._session_messages.append({"role": "user", "content": prompt})
+            self._session_messages.append({"role": "assistant", "content": text})
 
             try:
                 data = _robust_extract_json(text)
@@ -511,11 +527,12 @@ class WorkshopRunner:
             completed_steps=completed_steps,
         )
 
+        messages = self._build_messages(prompt)
         try:
             if self._agent_step_fn:
                 text = ""
                 async for event in self._agent_step_fn(
-                    messages=self._build_messages(prompt),
+                    messages=messages,
                     tools=[],
                     session_id=str(uuid.uuid4()),
                     mode="workshop",
@@ -527,7 +544,7 @@ class WorkshopRunner:
                 model_name = _build_model_name(self.llm_config)
                 rev_kwargs: dict[str, Any] = {
                     "model": model_name,
-                    "messages": self._build_messages(prompt),
+                    "messages": messages,
                     "max_tokens": self.llm_config.max_tokens,
                     "stream": False,
                 }
@@ -657,19 +674,22 @@ class WorkshopRunner:
             logger.warning("Failed to mark workshop goal as abandoned", exc_info=True)
 
     async def _store_memory(self, content: str, metadata: dict[str, str]) -> None:
-        """Store a workshop event in A-MEM for long-term recall."""
+        """Store a workshop event in A-MEM and track the ID to prevent self-poisoning."""
         if not self._amem:
             return
         try:
-            await self._amem.remember(content, metadata=metadata)
+            zettel = await self._amem.remember(content, metadata=metadata)
+            self._session_memory_ids.add(zettel.id)
         except Exception:
             logger.warning("Failed to store workshop memory", exc_info=True)
 
     async def _recall_context(self, query: str, memory_limit: int = 5) -> str:
         """Recall memories + cross-mode events relevant to a query.
 
-        Explicitly excludes thinking-mode events to prevent the workshop LLM
-        from being distracted by goal-oriented thoughts about other goals.
+        Explicitly excludes:
+        - thinking-mode events (EventLog filter via include_modes)
+        - ``type=thought`` memories (autonomous thought memories from A-MEM)
+        - memories written during the current session (prevent self-poisoning)
         """
         if not self._context_builder:
             return ""
@@ -679,6 +699,8 @@ class WorkshopRunner:
             memory_limit=memory_limit,
             event_limit=5,
             include_modes=["chat"],
+            exclude_types=["thought"],
+            exclude_ids=self._session_memory_ids,
         )
         parts: list[str] = []
         if result.memory_text:
@@ -687,16 +709,8 @@ class WorkshopRunner:
             parts.append(f"## Recent Activity\n{result.cross_mode_text}")
         return "\n\n".join(parts)
 
-    def _build_messages(self, prompt: str, extra_context: str = "") -> list[dict[str, Any]]:
-        """Build message list with system persona + user task prompt.
-
-        Separates personality context into system role (identity anchoring)
-        and keeps the task instructions as user role. This prevents the LLM
-        from treating the persona as instructions from another person.
-        """
-        messages: list[dict[str, Any]] = []
-
-        # System message: persona + workshop context + tool skills
+    def _build_system_message(self) -> dict[str, Any]:
+        """Build the static system message: persona + workshop framing + tool skills."""
         system_parts = []
         if self.personality_context:
             system_parts.append(self.personality_context)
@@ -707,17 +721,38 @@ class WorkshopRunner:
             "Stay fully in character. Do not address anyone directly."
         )
 
-        # Inject tool skill files so the agent knows how to use each tool
         if self._tool_skills:
             skill_lines = ["## Tool Usage Guidelines\n"]
             for tool_name, skill_text in self._tool_skills.items():
                 skill_lines.append(f"### {tool_name}\n{skill_text}\n")
             system_parts.append("\n".join(skill_lines))
 
-        if extra_context:
-            system_parts.append(extra_context)
+        return {"role": "system", "content": "\n\n".join(system_parts)}
 
-        messages.append({"role": "system", "content": "\n\n".join(system_parts)})
+    def _build_messages(self, prompt: str, extra_context: str = "") -> list[dict[str, Any]]:
+        """Return the cumulative session conversation + a new user turn.
+
+        If this is the very first call (session_messages is empty, e.g. called
+        outside of ``run()``), falls back to building a fresh message list so
+        direct calls to ``_generate_plan`` / ``_execute_step`` in tests still work.
+
+        ``extra_context`` is injected into the system message for this call only
+        (it is not persisted to ``_session_messages``).
+        """
+        if self._session_messages:
+            # Clone the cumulative history; optionally enrich system message
+            messages = list(self._session_messages)
+            if extra_context:
+                enriched_system = messages[0]["content"] + "\n\n" + extra_context
+                messages[0] = {"role": "system", "content": enriched_system}
+        else:
+            # Fallback: build a fresh list (used when run() was not called first)
+            system_msg = self._build_system_message()
+            if extra_context:
+                enriched = system_msg["content"] + "\n\n" + extra_context
+                system_msg = {"role": "system", "content": enriched}
+            messages = [system_msg]
+
         messages.append({"role": "user", "content": prompt})
         return messages
 
