@@ -477,7 +477,7 @@ class WorkshopRunner:
             session_id=session_id,
             mode="workshop",
             phase_size=10,
-            max_phases=1,
+            max_phases=3,
             purpose="workshop_step",
         ):
             if isinstance(event, TextChunkEvent):
@@ -511,6 +511,13 @@ class WorkshopRunner:
                         })
                     except Exception:
                         logger.warning("Workshop tool result broadcast failed", exc_info=True)
+
+        # Persist tool execution context so subsequent steps have full history.
+        self._session_messages.append({"role": "user", "content": tool_prompt})
+        self._session_messages.append({
+            "role": "assistant",
+            "content": full_text or "Used tools but produced no text output.",
+        })
 
     async def _review(self) -> None:
         """Final review of the workshop session."""
